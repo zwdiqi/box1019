@@ -1,8 +1,6 @@
 /**
  * 通用工具：响应构造、编码、哈希、校验。
  */
-const enc = new TextEncoder();
-
 export const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
@@ -63,11 +61,6 @@ export function stableHash(input) {
     h = Math.imul(h, 16777619) >>> 0;
   }
   return h.toString(36);
-}
-
-export async function sha1Hex(input) {
-  const buf = await crypto.subtle.digest('SHA-1', enc.encode(String(input)));
-  return bytesToHex(new Uint8Array(buf));
 }
 
 export function nowIso() {

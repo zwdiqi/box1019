@@ -43,9 +43,10 @@ export const DEFAULT_CONFIG = {
   liveTimeoutMs: 12000,
   // 正文长度下限（字节）：过短视为无效（多为错误页或空列表）
   liveMinBytes: 200,
-  // 自动更新时间（北京时间）。默认每月 1 号 11:00（北京）；
-  // 分钟后端只接受 0/15/30/45。
-  autoUpdate: { enabled: true, day: 1, hour: 11, minute: 0 },
+  // 自动更新时间。默认「间隔模式」每周执行一次（168 小时）。
+  // 也可改为「指定时间模式」在某年某月某日某时某分执行。
+  // intervalHours：间隔小时数（如 12=12小时, 24=1天, 168=1周, 360=半个月, 720=1个月）
+  autoUpdate: { enabled: true, mode: 'interval', intervalHours: 168, month: 1, day: 1, hour: 11, minute: 0 },
 };
 
 let bootstrapped = false;

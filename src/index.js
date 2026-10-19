@@ -23,9 +23,10 @@ const BIG_BUDGET_CRON = '0 3 * * 1';
 async function takeScheduleFiring(env, cfg) {
   const schedule = normalizeSchedule(cfg.autoUpdate);
   const now = Date.now();
-  if (!isDue(schedule, now)) return false;
-  const key = occurrenceKey(now, schedule);
   const mark = await getJSON(env, KEY.SCHEDULE, null);
+  const lastRunMs = mark && mark.at ? new Date(mark.at).getTime() : 0;
+  if (!isDue(schedule, now, lastRunMs)) return false;
+  const key = occurrenceKey(now, schedule);
   if (mark && mark.key === key) return false;
   await putJSON(env, KEY.SCHEDULE, { key, at: new Date(now).toISOString() });
   return true;

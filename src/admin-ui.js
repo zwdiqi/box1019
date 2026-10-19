@@ -56,6 +56,18 @@ td.tight{width:1%;white-space:nowrap}
 .progress > i{display:block;height:100%;background:var(--accent);width:0}
 .chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;margin:0 6px 6px 0;font-size:12px}
 .chip button{padding:0 6px;font-size:11px;line-height:18px;border-radius:999px;background:transparent;border-color:var(--line);color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg-btn{background:transparent;border:0;color:var(--muted);padding:7px 14px;cursor:pointer;font:inherit;font-size:13px}
+.seg-btn.active{background:var(--accent);color:#fff}
+.au-preset{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:6px 14px;border-radius:8px;cursor:pointer;font:inherit;font-size:13px}
+.au-preset:hover{border-color:var(--accent);color:var(--accent)}
+.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}
+.lat{font-variant-numeric:tabular-nums;font-size:12px}
+.lat.fast{color:var(--accent2)}
+.lat.mid{color:var(--warn)}
+.lat.slow{color:var(--danger)}
+.lat.na{color:var(--muted)}
+.pill{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);background:#222a38;border:1px solid var(--line);color:var(--text);padding:10px 18px;border-radius:10px;opacity:0;pointer-events:none;transition:.25s}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.err{border-color:var(--danger);color:#ffd7d7}
@@ -129,7 +141,6 @@ export function adminPage() {
     <span class="badge" id="bgPipe">空闲</span>
     <span class="badge warn" id="bgPwd" style="display:none">使用默认密码</span>
     <span class="spacer"></span>
-    <a href="/" target="_blank" class="small">公开页 ↗</a>
     <button class="ghost" id="btnLogout">退出登录</button>
   </header>
   <nav class="tabs" id="tabs"></nav>
@@ -140,7 +151,7 @@ export function adminPage() {
 (function(){
 'use strict';
 
-var TABS=[['dash','数据看板'],['sources','源地址清单'],['manual','手动源'],['lives','直播源'],['output','自动源编辑'],['subs','自定义订阅'],['config','配置'],['security','密码']];
+var TABS=[['dash','数据看板'],['preview','源预览'],['sources','源地址清单'],['manual','手动源'],['lives','直播源'],['output','自动源编辑'],['subs','自定义订阅'],['config','配置'],['security','密码']];
 var S={state:null,tv:null,av:null,tab:'dash',pollTimer:null};
 
 var $=function(s,r){return (r||document).querySelector(s);};
@@ -216,12 +227,13 @@ function render(){
   $('#bgPipe').className='badge'+((p&&p.running)?' warn':'');
   $('#tabs').innerHTML=TABS.map(function(t){ return '<button class="tab'+(S.tab===t[0]?' active':'')+'" data-tab="'+t[0]+'">'+t[1]+'</button>'; }).join('');
   if(S.tab==='dash') renderDash();
+  else if(S.tab==='preview') renderPreview();
   else if(S.tab==='sources') renderSources();
   else if(S.tab==='manual') renderManual();
   else if(S.tab==='lives') renderLives();
   else if(S.tab==='output') renderOutput();
   else if(S.tab==='subs') renderSubs();
-  else if(S.tab==='config') renderConfig();
+  else if(S.tab==='config'){ renderConfig(); updateIntervalHint(); }
   else if(S.tab==='security') renderSecurity();
 }
 
@@ -257,6 +269,64 @@ function renderDash(){
   }
   $('#view').innerHTML=html;
   schedulePoll();
+}
+
+// 源预览：只读展示 tv.json / av.json 中的源，支持分类切换与搜索
+var PREV={cat:'tv',q:''};
+function renderPreview(){
+  var html=card(
+    '<h2>源预览</h2>'+
+    '<p class="muted small">只读展示当前 tv.json / av.json 中的源（含手动源）。按延迟升序排列，可切换普通源 / 成人源，可按名称或接口地址搜索。</p>'+
+    '<div class="row" style="margin-bottom:12px">'+
+      '<div class="seg" id="prevSeg">'+
+        '<button class="seg-btn'+(PREV.cat==='tv'?' active':'')+'" data-cat="tv">普通源</button>'+
+        '<button class="seg-btn'+(PREV.cat==='av'?' active':'')+'" data-cat="av">成人源</button>'+
+      '</div>'+
+      '<input id="prevQ" placeholder="搜索源名称 / 接口地址…" style="flex:1;min-width:180px" value="'+esc(PREV.q)+'">'+
+      '<span class="muted small" id="prevCount"></span>'+
+    '</div>'+
+    '<div class="table-wrap"><table>'+
+      '<thead><tr><th style="width:44px">#</th><th>名称</th><th>接口 / 爬虫</th><th style="width:90px">类型</th><th style="width:100px">延迟</th></tr></thead>'+
+      '<tbody id="prevRows"><tr><td colspan="5" class="muted" style="padding:18px">加载中…</td></tr></tbody>'+
+    '</table></div>'
+  );
+  $('#view').innerHTML=html;
+  renderPreviewTable();
+}
+function renderPreviewTable(){
+  var file=PREV.cat==='av'?S.av:S.tv;
+  var sites=(file&&Array.isArray(file.sites))?file.sites.slice():[];
+  var q=PREV.q.trim().toLowerCase();
+  if(q){
+    sites=sites.filter(function(s){
+      return String(s.name||'').toLowerCase().indexOf(q)>=0
+        || String(s.api||'').toLowerCase().indexOf(q)>=0;
+    });
+  }
+  sites.sort(function(a,b){
+    var am=Number.isFinite(a._latency)?a._latency:Infinity;
+    var bm=Number.isFinite(b._latency)?b._latency:Infinity;
+    if(am!==bm) return am-bm;
+    return String(a.name||'').localeCompare(String(b.name||''),'zh-Hans-CN');
+  });
+  $('#prevCount').textContent='共 '+sites.length+' 条';
+  if(!sites.length){
+    $('#prevRows').innerHTML='<tr><td colspan="5" class="muted" style="padding:18px">没有匹配的源。若尚未生成，请先在「数据看板」执行一次整理。</td></tr>';
+    return;
+  }
+  $('#prevRows').innerHTML=sites.map(function(s,i){
+    var tip=s.api&&s.api.indexOf('csp_')===0?'csp_':(Number(s.type)===3?'type 3':(s.type==null?'—':'type '+s.type));
+    var lat=s._latency==null||!isFinite(s._latency)
+      ? '<span class="lat na">未测速</span>'
+      : '<span class="lat '+(s._latency<400?'fast':(s._latency<1200?'mid':'slow'))+'">'+Math.round(s._latency)+' ms</span>';
+    return '<tr>'+
+      '<td class="muted">'+(i+1)+'</td>'+
+      '<td>'+esc(s.name||'(未命名)')+'</td>'+
+      '<td class="mono">'+esc(s.api||'')+'</td>'+
+      '<td><span class="pill">'+esc(tip)+'</span></td>'+
+      '<td>'+lat+'</td>'+
+    '</tr>';
+  }).join('');
 }
 
 // 订阅链接：后台里直接给出可用的 TVBox 订阅地址
@@ -592,6 +662,8 @@ function collectSubs(){
 }
 
 // 配置
+function monthRange(){ var out=[]; for(var i=1;i<=12;i++){ out.push(i); } return out; }
+var MONTH_LABELS={}; (function(){ for(var i=1;i<=12;i++){ MONTH_LABELS[i]=i+'月'; } })();
 function dayRange(){ var out=[]; for(var i=1;i<=31;i++){ out.push(i); } return out; }
 var DAY_OF_MONTH_LABELS={}; (function(){ for(var i=1;i<=31;i++){ DAY_OF_MONTH_LABELS[i]=i+'日'; } })();
 function pad2(v){ v=String(v); return v.length<2?'0'+v:v; }
@@ -606,18 +678,46 @@ function renderConfig(){
   var c=(S.state&&S.state.config)||{};
   var kw=Array.isArray(c.adultKeywords)?c.adultKeywords.join(','):'';
   var au=c.autoUpdate||{};
+  var auMode=au.mode==='datetime'?'datetime':'interval';
+  var intervalHours=au.intervalHours==null?168:Number(au.intervalHours);
   var html=card(
     '<h2>自动更新时间</h2>'+
-    '<p class="muted small">每月定时执行一次整理，时间为<b>北京时间</b>。到点检测由每 15 分钟一次的心跳任务完成，所以分钟只能选 0 / 15 / 30 / 45（例：每月 1 号 11:00 北京）。</p>'+
+    '<p class="muted small">支持两种模式：<b>间隔模式</b>每隔 N 小时自动整理一次；<b>指定时间</b>在每年某月某日某时某分执行。到点检测由每 15 分钟一次的心跳任务完成。</p>'+
     '<div class="row" style="margin-bottom:10px">'+
       '<label class="row small"><input type="checkbox" id="au"'+(au.enabled!==false?' checked':'')+'> 启用自动更新</label>'+
     '</div>'+
-    '<div class="grid">'+
-      '<div class="stat"><div class="k">日期</div><select id="auDay">'+optionList(dayRange(), au.day==null?1:au.day, DAY_OF_MONTH_LABELS)+'</select></div>'+
-      '<div class="stat"><div class="k">小时</div><select id="auHour">'+optionList(hourRange(), au.hour==null?11:au.hour)+'</select></div>'+
-      '<div class="stat"><div class="k">分钟</div><select id="auMin">'+optionList([0,15,30,45], au.minute==null?0:au.minute)+'</select></div>'+
+    '<div class="row" style="margin-bottom:12px">'+
+      '<div class="seg" id="auMode">'+
+        '<button class="seg-btn'+(auMode==='interval'?' active':'')+'" data-mode="interval">间隔模式</button>'+
+        '<button class="seg-btn'+(auMode==='datetime'?' active':'')+'" data-mode="datetime">指定时间</button>'+
+      '</div>'+
     '</div>'+
-    '<p class="muted small" style="margin-top:10px">改完点最下方的「保存配置」生效，不需要重新部署。若设定的「几号」超过当月天数，自动取当月最后一天。</p>'
+    // 间隔模式
+    '<div id="auIntervalPanel" style="display:'+(auMode==='interval'?'block':'none')+'">'+
+      '<p class="muted small">选择预设间隔，或在下方输入自定义小时数：</p>'+
+      '<div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:8px">'+
+        '<button type="button" class="au-preset" data-hours="12">12 小时</button>'+
+        '<button type="button" class="au-preset" data-hours="24">1 天</button>'+
+        '<button type="button" class="au-preset" data-hours="168">1 周</button>'+
+        '<button type="button" class="au-preset" data-hours="360">半个月</button>'+
+        '<button type="button" class="au-preset" data-hours="720">1 个月</button>'+
+      '</div>'+
+      '<div class="grid">'+
+        '<div class="stat"><div class="k">间隔小时数</div><input type="number" id="auInterval" min="1" max="8784" value="'+intervalHours+'"></div>'+
+      '</div>'+
+      '<p class="muted small" style="margin-top:8px" id="auIntervalHint"></p>'+
+    '</div>'+
+    // 指定时间模式
+    '<div id="auDatetimePanel" style="display:'+(auMode==='datetime'?'block':'none')+'">'+
+      '<div class="grid">'+
+        '<div class="stat"><div class="k">月份</div><select id="auMonth">'+optionList(monthRange(), au.month==null?1:au.month, MONTH_LABELS)+'</select></div>'+
+        '<div class="stat"><div class="k">日期</div><select id="auDay">'+optionList(dayRange(), au.day==null?1:au.day, DAY_OF_MONTH_LABELS)+'</select></div>'+
+        '<div class="stat"><div class="k">小时</div><select id="auHour">'+optionList(hourRange(), au.hour==null?11:au.hour)+'</select></div>'+
+        '<div class="stat"><div class="k">分钟</div><select id="auMin">'+optionList([0,15,30,45], au.minute==null?0:au.minute)+'</select></div>'+
+      '</div>'+
+      '<p class="muted small" style="margin-top:10px">指定时间为<b>北京时间</b>，分钟只能选 0 / 15 / 30 / 45。若设定的「几号」超过当月天数，自动取当月最后一天。</p>'+
+    '</div>'+
+    '<p class="muted small" style="margin-top:10px">改完点最下方的「保存配置」生效，不需要重新部署。</p>'
   );
   html+=card(
     '<h2>直播源自动更新</h2>'+
@@ -678,6 +778,9 @@ function collectConfig(){
   cfg.liveEnabled=$('#lvEn').checked;
   cfg.autoUpdate={
     enabled:$('#au').checked,
+    mode:$('#auMode .seg-btn.active').getAttribute('data-mode'),
+    intervalHours:Math.max(1,Math.min(8784,Math.round(Number($('#auInterval').value)||168))),
+    month:Number($('#auMonth').value),
     day:Number($('#auDay').value),
     hour:Number($('#auHour').value),
     minute:Number($('#auMin').value)
@@ -709,10 +812,64 @@ $('#btnLogout').addEventListener('click',function(){
 });
 
 $('#view').addEventListener('click',function(e){
+  var seg=e.target.closest('#prevSeg .seg-btn');
+  if(seg){
+    PREV.cat=seg.getAttribute('data-cat');
+    $$('#prevSeg .seg-btn').forEach(function(b){ b.classList.toggle('active',b===seg); });
+    renderPreviewTable();
+    return;
+  }
+  // 自动更新模式切换
+  var auSeg=e.target.closest('#auMode .seg-btn');
+  if(auSeg){
+    $$('#auMode .seg-btn').forEach(function(b){ b.classList.toggle('active',b===auSeg); });
+    var mode=auSeg.getAttribute('data-mode');
+    var iv=document.getElementById('auIntervalPanel');
+    var dt=document.getElementById('auDatetimePanel');
+    if(iv) iv.style.display=mode==='interval'?'block':'none';
+    if(dt) dt.style.display=mode==='datetime'?'block':'none';
+    return;
+  }
+  // 间隔预设按钮
+  var preset=e.target.closest('.au-preset');
+  if(preset){
+    var h=Number(preset.getAttribute('data-hours'));
+    var inp=document.getElementById('auInterval');
+    if(inp){ inp.value=h; updateIntervalHint(); }
+    return;
+  }
   var b=e.target.closest('[data-act]'); if(!b) return;
   var act=b.getAttribute('data-act');
   handle(act,b).catch(function(err){ toast(err.message||String(err),true); });
 });
+
+$('#view').addEventListener('input',function(e){
+  var inp=e.target.closest('#prevQ');
+  if(inp){ PREV.q=inp.value; renderPreviewTable(); return; }
+  var auInp=e.target.closest('#auInterval');
+  if(auInp){ updateIntervalHint(); return; }
+});
+
+// 将间隔小时数转成可读描述
+function formatInterval(hours){
+  hours=Math.max(1,Math.min(8784,Math.round(Number(hours)||1)));
+  if(hours<24) return hours+' 小时';
+  var days=hours/24;
+  if(hours%24===0){
+    if(days===7) return '1 周（168 小时）';
+    if(days===14) return '2 周（336 小时）';
+    if(days===15) return '半个月（360 小时）';
+    if(days===30) return '1 个月（720 小时）';
+    if(days===1) return '1 天（24 小时）';
+    return days+' 天（'+hours+' 小时）';
+  }
+  return hours+' 小时（约 '+days.toFixed(1)+' 天）';
+}
+function updateIntervalHint(){
+  var inp=document.getElementById('auInterval');
+  var hint=document.getElementById('auIntervalHint');
+  if(inp&&hint) hint.textContent='当前间隔：'+formatInterval(inp.value);
+}
 
 function handle(act,btn){
   if(act==='reload'){ return loadState().then(render); }

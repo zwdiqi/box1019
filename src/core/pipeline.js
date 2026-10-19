@@ -27,12 +27,19 @@ export async function startRun(env, reason = 'manual') {
     return { error: '没有启用的源地址，无法开始整理。请先在后台「源地址清单」中添加或启用。' };
   }
   const runId = `${Date.now().toString(36)}-${randomHex(3)}`;
-  const queue = sources.map((s) => ({
-    url: s.url,
-    name: String(s.name || ''),
-    depth: 0,
-    category: s.category === 'av' || s.category === 'tv' ? s.category : 'auto',
-  }));
+  const seen = new Set();
+  const queue = [];
+  for (const s of sources) {
+    const url = s.url;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    queue.push({
+      url,
+      name: String(s.name || ''),
+      depth: 0,
+      category: s.category === 'av' || s.category === 'tv' ? s.category : 'auto',
+    });
+  }
   await putJSON(env, TMP.queue(runId), queue);
   const stamp = nowIso();
   const state = {
@@ -59,7 +66,6 @@ async function tickFetch(env, state, ctx) {
   let queue = await getJSON(env, TMP.queue(state.runId), null);
   if (!Array.isArray(queue)) queue = [];
   let chunkIndex = state.chunkCount || 0;
-  let queueChanged = false;
 
   while (state.sourceCursor < queue.length && ctx.budgetLeft > 0 && Date.now() < ctx.deadline) {
     const item = queue[state.sourceCursor];
@@ -90,6 +96,7 @@ async function tickFetch(env, state, ctx) {
           state.baseCaptured = true;
         }
       } else if (parsed.kind === 'repo') {
+        let added = false;
         for (const repo of parsed.repos) {
           if (queue.length >= cfg.maxRepos) break;
           if (queue.some((x) => x.url === repo.url)) continue;
@@ -99,8 +106,10 @@ async function tickFetch(env, state, ctx) {
             depth: (item.depth || 0) + 1,
             category: item.category || 'auto',
           });
-          queueChanged = true;
+          added = true;
         }
+        // 立即保存队列，防止崩溃后丢失新发现的订阅源
+        if (added) await putJSON(env, TMP.queue(state.runId), queue);
       } else {
         state.errors.push({ url: item.url, message: parsed.reason || '无法识别' });
       }
@@ -113,7 +122,6 @@ async function tickFetch(env, state, ctx) {
   }
 
   state.chunkCount = chunkIndex;
-  if (queueChanged) await putJSON(env, TMP.queue(state.runId), queue);
   return state.sourceCursor >= queue.length;
 }
 
@@ -125,6 +133,15 @@ async function tickSpeed(env, state, ctx) {
     // 剩余预算不够跑完一个分片时就停下，避免超发外部请求（免费版单次上限 50）
     if (processed > 0 && ctx.budgetLeft < cfg.chunkSize) break;
     const key = TMP.raw(state.runId, state.chunkCursor);
+    const doneKey = TMP.done(state.runId, state.chunkCursor);
+    // 崩溃续跑优化：若 done 分片已存在，说明上一轮已处理过，直接跳过（避免重复测速）
+    const existing = await getJSON(env, doneKey, null);
+    if (Array.isArray(existing)) {
+      await del(env, key);
+      state.chunkCursor += 1;
+      processed += 1;
+      continue;
+    }
     const chunk = await getJSON(env, key, null);
     if (!Array.isArray(chunk)) {
       state.chunkCursor += 1;
@@ -196,7 +213,8 @@ async function tickLive(env, state, ctx) {
 
   let results = await getJSON(env, TMP.live(state.runId), null);
   if (!Array.isArray(results)) results = [];
-  let cursor = state.liveCursor || 0;
+  // 以已保存结果长度为准，防止崩溃后 results 与 cursor 不同步导致重复追加
+  let cursor = Math.max(state.liveCursor || 0, results.length);
 
   while (cursor < enabled.length && ctx.budgetLeft > 0 && Date.now() < ctx.deadline) {
     const take = Math.min(enabled.length - cursor, Math.max(1, Math.min(ctx.budgetLeft, cfg.probeConcurrency * 2)));
@@ -342,33 +360,65 @@ export async function continueRun(env, { budget = 9000, deadlineMs = 780000 } = 
   const state = await getJSON(env, KEY.PIPELINE, null);
   if (!state || state.phase === 'done') return { finished: true, state };
   if (!Array.isArray(state.errors)) state.errors = [];
+  // 状态自愈：缺失的游标字段补默认值，避免脏数据导致死循环
+  if (!Number.isFinite(state.sourceCursor)) state.sourceCursor = 0;
+  if (!Number.isFinite(state.chunkCursor)) state.chunkCursor = 0;
+  if (!Number.isFinite(state.chunkCount)) state.chunkCount = 0;
+  if (!Number.isFinite(state.liveCursor)) state.liveCursor = 0;
 
   const ctx = { cfg, budgetLeft: Math.max(1, budget | 0), deadline: Date.now() + deadlineMs };
   let lastCheckpoint = 0;
   let steps = 0;
+  let noProgress = 0;
 
   while (state.phase !== 'done' && Date.now() < ctx.deadline && (steps === 0 || ctx.budgetLeft > 0)) {
-    if (state.phase === 'fetch') {
-      const done = await tickFetch(env, state, ctx);
-      if (done) {
-        state.phase = 'speed';
-        state.chunkCursor = 0;
+    const phaseBefore = state.phase;
+    const cursorBefore = state.sourceCursor + state.chunkCursor + state.liveCursor;
+    let done = false;
+    try {
+      if (state.phase === 'fetch') {
+        done = await tickFetch(env, state, ctx);
+        if (done) {
+          state.phase = 'speed';
+          state.chunkCursor = 0;
+        }
+      } else if (state.phase === 'speed') {
+        done = await tickSpeed(env, state, ctx);
+        if (done) {
+          state.phase = 'live';
+          state.liveCursor = 0;
+        }
+      } else if (state.phase === 'live') {
+        done = await tickLive(env, state, ctx);
+        if (done) state.phase = 'rank';
+      } else if (state.phase === 'rank') {
+        await tickRank(env, state, ctx);
+        state.phase = 'done';
+      } else {
+        break;
       }
-    } else if (state.phase === 'speed') {
-      const done = await tickSpeed(env, state, ctx);
-      if (done) {
-        state.phase = 'live';
-        state.liveCursor = 0;
-      }
-    } else if (state.phase === 'live') {
-      const done = await tickLive(env, state, ctx);
-      if (done) state.phase = 'rank';
-    } else if (state.phase === 'rank') {
-      await tickRank(env, state, ctx);
-      state.phase = 'done';
-    } else {
-      break;
+    } catch (e) {
+      // 单阶段异常不打断整体续跑，记错误后下一 tick 重试
+      state.errors.push({ phase: state.phase, message: (e && e.message) || String(e) });
+      if (state.errors.length > MAX_ERRORS) state.errors = state.errors.slice(-MAX_ERRORS);
     }
+
+    const cursorAfter = state.sourceCursor + state.chunkCursor + state.liveCursor;
+    if (state.phase === phaseBefore && cursorAfter === cursorBefore && !done) {
+      noProgress += 1;
+      // 连续 3 次无进展 → 该阶段卡住，强制推进避免死循环
+      if (noProgress >= 3) {
+        state.errors.push({ phase: state.phase, message: '阶段无进展，强制推进' });
+        if (state.phase === 'fetch') { state.phase = 'speed'; state.chunkCursor = 0; }
+        else if (state.phase === 'speed') { state.phase = 'live'; state.liveCursor = 0; }
+        else if (state.phase === 'live') { state.phase = 'rank'; }
+        else break;
+        noProgress = 0;
+      }
+    } else {
+      noProgress = 0;
+    }
+
     steps += 1;
     const t = Date.now();
     if (t - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) {

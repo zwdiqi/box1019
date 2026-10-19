@@ -88,7 +88,13 @@ const LIST_KEYS = ['data', 'list', 'items', 'result', 'results', 'rows', 'conten
 export function parseConfig(text, baseUrl) {
   let obj;
   try {
-    obj = JSON.parse(text);
+    // 先尝试直接解析；失败则剥离 // 行注释后再试（TVBox 配置里常见）
+    try {
+      obj = JSON.parse(text);
+    } catch {
+      const stripped = text.replace(/^[ \t]*\/\/.*$/gm, '');
+      obj = JSON.parse(stripped);
+    }
   } catch {
     return { kind: 'invalid', reason: 'JSON 解析失败' };
   }
@@ -147,9 +153,9 @@ export function buildSite(raw, baseUrl) {
   return site;
 }
 
-const ENVELOPE_KEYS = ['spider', 'wallpaper', 'logo', 'parses', 'flags', 'ads', 'rules', 'ijk', 'doh', 'lives'];
+const ENVELOPE_KEYS = ['spider', 'lives'];
 
-/** 提取 TVBox 信封（spider / lives / parses …），并解析其中的相对路径；不含 sites */
+/** 提取 TVBox 信封（spider / lives），并解析其中的相对路径；不含 sites */
 export function buildEnvelope(envelope, baseUrl) {
   const out = {};
   for (const k of ENVELOPE_KEYS) {
@@ -157,20 +163,11 @@ export function buildEnvelope(envelope, baseUrl) {
     out[k] = envelope[k];
   }
   if (typeof out.spider === 'string') out.spider = absolutizeSpider(out.spider, baseUrl);
-  if (typeof out.wallpaper === 'string') out.wallpaper = absolutizeValue(out.wallpaper, baseUrl);
   if (Array.isArray(out.lives)) {
     out.lives = out.lives.filter(isPlainObject).map((l) => {
       const next = { ...l };
       if (next.url !== undefined) next.url = absolutizeValue(next.url, baseUrl);
       if (next.logo !== undefined) next.logo = absolutizeValue(next.logo, baseUrl);
-      return next;
-    });
-  }
-  if (Array.isArray(out.parses)) {
-    out.parses = out.parses.filter(isPlainObject).map((p) => {
-      const next = { ...p };
-      if (next.url !== undefined) next.url = absolutizeValue(next.url, baseUrl);
-      if (next.ext !== undefined) next.ext = absolutizeValue(next.ext, baseUrl);
       return next;
     });
   }

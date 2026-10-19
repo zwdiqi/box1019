@@ -5,6 +5,7 @@
  * 判定标准：只要拿到响应头就算「连通」（403/404 也算通），请求异常/超时才判为失效。
  * 直播源（m3u/txt 列表）另需读取正文判定有效性，因此额外提供限长读取的探测函数。
  */
+import { decryptContent } from './decrypt.js';
 
 export function isTestable(site) {
   const api = typeof site.api === 'string' ? site.api : '';
@@ -22,7 +23,12 @@ export async function fetchText(url, timeoutMs = 8000) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.text();
+  const buffer = await res.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const text = new TextDecoder('utf-8').decode(bytes);
+  // 尝试解密（base64 / 图片伪装等），解密失败则用原始文本
+  const decrypted = decryptContent(text, bytes);
+  return decrypted || text;
 }
 
 /** 探测正文读取上限（字节）：用于测速同时抓取内容做成人/普通分类 */
@@ -40,8 +46,9 @@ export async function probe(url, timeoutMs = 8000, maxBytes = PROBE_BODY_MAX_BYT
     const ms = Date.now() - t0;
     // 读取有限正文：既测 TTFB，又拿到内容用于成人源识别
     // 无论 HTTP 状态码如何（403/404 也算连通），都尝试读取正文以做分类
-    const text = await readLimited(res, maxBytes);
-    return { ok: true, ms, status: res.status, text };
+    const { text, bytes } = await readLimited(res, maxBytes);
+    const decrypted = decryptContent(text, bytes);
+    return { ok: true, ms, status: res.status, text: decrypted || text };
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, status: 0, text: '', error: (e && e.message) || String(e) };
   }
@@ -49,20 +56,18 @@ export async function probe(url, timeoutMs = 8000, maxBytes = PROBE_BODY_MAX_BYT
 
 /** 读取响应正文，最多 maxBytes 字节（避免大文件把一次调用撑爆） */
 async function readLimited(res, maxBytes) {
-  if (!res.body) return '';
+  if (!res.body) return { text: '', bytes: new Uint8Array() };
   const reader = res.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let out = '';
+  const chunks = [];
   let received = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      chunks.push(value);
       received += value.length;
-      out += decoder.decode(value, { stream: true });
       if (received >= maxBytes) break;
     }
-    out += decoder.decode();
   } finally {
     try {
       await reader.cancel();
@@ -70,7 +75,14 @@ async function readLimited(res, maxBytes) {
       /* 忽略取消流的异常 */
     }
   }
-  return out;
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.length;
+  }
+  const text = new TextDecoder('utf-8').decode(bytes);
+  return { text, bytes };
 }
 
 /**
@@ -97,7 +109,7 @@ export async function fetchLimited(url, timeoutMs = 10000, maxBytes = 65536) {
       }
       return { ok: false, ms, status: res.status, text: '', error: `HTTP ${res.status}` };
     }
-    const text = await readLimited(res, maxBytes);
+    const { text } = await readLimited(res, maxBytes);
     return { ok: true, ms, status: res.status, text };
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, status: 0, text: '', error: (e && e.message) || String(e) };
