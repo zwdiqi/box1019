@@ -204,6 +204,42 @@ function siteId(site){
   return 'h'+stableHash((site.name||'')+'|'+api+'|'+(site.type==null?'':site.type));
 }
 function fmtTime(iso){ if(!iso) return '—'; try{ return new Date(iso).toLocaleString('zh-CN'); }catch(e){ return String(iso); } }
+function liveIdOf(l){ if(l&&l._id) return l._id; return 'lv_'+stableHash((l&&l.url)||''); }
+
+// —— 在线测速（批量分片，每片 6 个地址，避免超出免费版单次子请求限额） ——
+var SRCRES={};   // 源地址清单测试结果 url -> result
+var LIVETEST={}; // 直播源清单测试结果 url -> result
+function testBadge(r,src){
+  if(!r) return '—';
+  if(r.ok){
+    var extra='';
+    if(src){
+      if(r.sites!=null) extra=' · '+r.sites+' 站点';
+      else if(r.repos!=null) extra=' · '+r.repos+' 仓库';
+      else if(src==='live'&&r.valid===false) return '<span class="lat slow" title="'+esc(r.error||'内容无效')+'">无效</span>';
+    }
+    return '<span class="lat fast">'+r.ms+'ms'+esc(extra)+'</span>';
+  }
+  return '<span class="lat slow" title="'+esc(r.error||'失败')+'">失败</span>';
+}
+function testUrls(kind,urls,resMap,statId,onBatch,onDone){
+  var chunks=[];
+  for(var i=0;i<urls.length;i+=6){ chunks.push(urls.slice(i,i+6)); }
+  var total=urls.length, doneN=0;
+  function next(){
+    if(!chunks.length){ if(onDone) onDone(); return Promise.resolve(); }
+    var batch=chunks.shift();
+    return req('POST','/api/admin/test',{kind:kind,urls:batch}).then(function(d){
+      (d.results||[]).forEach(function(r){ resMap[r.url]=r; });
+      doneN+=batch.length;
+      var st=document.getElementById(statId);
+      if(st) st.textContent='测速中 '+doneN+'/'+total+' …';
+      if(onBatch) onBatch();
+      return next();
+    });
+  }
+  return next();
+}
 
 // —— 加载与渲染 ——
 function loadState(){
@@ -269,29 +305,37 @@ function renderDash(){
   schedulePoll();
 }
 
-// 源预览：只读展示 tv.json / av.json 中的源，支持分类切换与搜索
-var PREV={cat:'tv',q:''};
+// 源预览：只读展示 tv.json / av.json 中的源，支持分类切换、搜索、在线测速与手动排序
+var PREV={cat:'tv',q:'',test:{},ids:null,sel:{}};
 function renderPreview(){
   var html=card(
-    '<h2>源预览</h2>'+
-    '<p class="muted small">只读展示当前 tv.json / av.json 中的源（含手动源）。按延迟升序排列，可切换普通源 / 成人源，可按名称或接口地址搜索。</p>'+
+    '<h2>源预览 · 测速 · 排序</h2>'+
+    '<p class="muted small">展示当前 tv.json / av.json 中的源（含手动源）。勾选后可对单个或多个源<b>在线测速</b>（结果临时显示，不写回配置）；用 ↑ / ↓ 调整顺序后点「保存排序」，<b>手动排序会持久保存，重新整理后依然生效</b>；未排序的源仍按测速速度排列。</p>'+
     '<div class="row" style="margin-bottom:12px">'+
       '<div class="seg" id="prevSeg">'+
         '<button class="seg-btn'+(PREV.cat==='tv'?' active':'')+'" data-cat="tv">普通源</button>'+
         '<button class="seg-btn'+(PREV.cat==='av'?' active':'')+'" data-cat="av">成人源</button>'+
       '</div>'+
-      '<input id="prevQ" placeholder="搜索源名称 / 接口地址…" style="flex:1;min-width:180px" value="'+esc(PREV.q)+'">'+
+      '<input id="prevQ" placeholder="搜索源名称 / 接口地址…" style="flex:1;min-width:160px" value="'+esc(PREV.q)+'">'+
       '<span class="muted small" id="prevCount"></span>'+
     '</div>'+
+    '<div class="toolbar">'+
+      '<label class="row small"><input type="checkbox" id="prevSelAll"> 全选</label>'+
+      '<button class="ghost" data-act="test-sites-sel">测试所选</button>'+
+      '<button class="ghost" data-act="test-sites-all">测速全部</button>'+
+      '<button data-act="save-order">保存排序</button>'+
+      '<button class="ghost" data-act="reset-order">重置排序</button>'+
+      '<span class="muted small" id="prevStat"></span>'+
+    '</div>'+
     '<div class="table-wrap"><table>'+
-      '<thead><tr><th style="width:44px">#</th><th>名称</th><th>接口 / 爬虫</th><th style="width:90px">类型</th><th style="width:100px">延迟</th></tr></thead>'+
-      '<tbody id="prevRows"><tr><td colspan="5" class="muted" style="padding:18px">加载中…</td></tr></tbody>'+
+      '<thead><tr><th style="width:34px"></th><th style="width:44px">#</th><th>名称</th><th>接口 / 爬虫</th><th style="width:80px">类型</th><th style="width:130px">延迟 / 测速</th><th style="width:84px">排序</th></tr></thead>'+
+      '<tbody id="prevRows"><tr><td colspan="7" class="muted" style="padding:18px">加载中…</td></tr></tbody>'+
     '</table></div>'
   );
   $('#view').innerHTML=html;
   renderPreviewTable();
 }
-function renderPreviewTable(){
+function prevSites(){
   var file=PREV.cat==='av'?S.av:S.tv;
   var sites=(file&&Array.isArray(file.sites))?file.sites.slice():[];
   var q=PREV.q.trim().toLowerCase();
@@ -301,30 +345,66 @@ function renderPreviewTable(){
         || String(s.api||'').toLowerCase().indexOf(q)>=0;
     });
   }
-  sites.sort(function(a,b){
-    var am=Number.isFinite(a._latency)?a._latency:Infinity;
-    var bm=Number.isFinite(b._latency)?b._latency:Infinity;
-    if(am!==bm) return am-bm;
-    return String(a.name||'').localeCompare(String(b.name||''),'zh-Hans-CN');
-  });
+  if(PREV.ids){
+    // 手动排序编辑中：登记过的按登记顺序排前，未登记的排最后（保持原有相对顺序）
+    var idx={}; PREV.ids.forEach(function(id,i){ idx[id]=i; });
+    sites.sort(function(a,b){
+      var ia=idx[a._id||siteId(a)]; if(ia==null) ia=1e9;
+      var ib=idx[b._id||siteId(b)]; if(ib==null) ib=1e9;
+      return ia-ib;
+    });
+  }
+  return sites;
+}
+function prevEnsureIds(){
+  if(PREV.ids) return;
+  // 首次排序时，以当前完整显示顺序（含被搜索隐藏的行）初始化
+  var file=PREV.cat==='av'?S.av:S.tv;
+  var sites=(file&&Array.isArray(file.sites))?file.sites:[];
+  PREV.ids=sites.map(function(s){ return s._id||siteId(s); });
+}
+function prevMove(id,dir){
+  prevEnsureIds();
+  // 与搜索可见的相邻行交换，保证搜索状态下也能逐步移动
+  var vis=prevSites().map(function(s){ return s._id||siteId(s); });
+  var pos=vis.indexOf(id);
+  var other=vis[pos+dir];
+  if(pos<0||other==null) return;
+  var i=PREV.ids.indexOf(id), j=PREV.ids.indexOf(other);
+  PREV.ids[i]=other; PREV.ids[j]=id;
+  renderPreviewTable();
+}
+function renderPreviewTable(){
+  var sites=prevSites();
   $('#prevCount').textContent='共 '+sites.length+' 条';
   if(!sites.length){
-    $('#prevRows').innerHTML='<tr><td colspan="5" class="muted" style="padding:18px">没有匹配的源。若尚未生成，请先在「数据看板」执行一次整理。</td></tr>';
+    $('#prevRows').innerHTML='<tr><td colspan="7" class="muted" style="padding:18px">没有匹配的源。若尚未生成，请先在「数据看板」执行一次整理。</td></tr>';
     return;
   }
   $('#prevRows').innerHTML=sites.map(function(s,i){
+    var id=s._id||siteId(s);
     var tip=s.api&&s.api.indexOf('csp_')===0?'csp_':(Number(s.type)===3?'type 3':(s.type==null?'—':'type '+s.type));
-    var lat=s._latency==null||!isFinite(s._latency)
-      ? '<span class="lat na">未测速</span>'
-      : '<span class="lat '+(s._latency<400?'fast':(s._latency<1200?'mid':'slow'))+'">'+Math.round(s._latency)+' ms</span>';
-    return '<tr>'+
+    var lat;
+    var tr=PREV.test[s.api];
+    if(tr) lat=testBadge(tr);
+    else if(s._latency==null||!isFinite(s._latency)) lat='<span class="lat na">未测速</span>';
+    else lat='<span class="lat '+(s._latency<400?'fast':(s._latency<1200?'mid':'slow'))+'">'+Math.round(s._latency)+' ms</span>';
+    var testable=/^https?:\/\//i.test(String(s.api||''));
+    return '<tr data-id="'+esc(id)+'">'+
+      '<td>'+(testable?'<input type="checkbox" class="prev-sel" data-url="'+esc(s.api)+'"'+(PREV.sel[s.api]?' checked':'')+'>':'')+'</td>'+
       '<td class="muted">'+(i+1)+'</td>'+
       '<td>'+esc(s.name||'(未命名)')+'</td>'+
       '<td class="mono">'+esc(s.api||'')+'</td>'+
       '<td><span class="pill">'+esc(tip)+'</span></td>'+
       '<td>'+lat+'</td>'+
+      '<td class="tight">'+
+        '<button class="ghost" data-act="ord-up" data-id="'+esc(id)+'" title="上移">↑</button>'+
+        '<button class="ghost" data-act="ord-down" data-id="'+esc(id)+'" title="下移">↓</button>'+
+      '</td>'+
     '</tr>';
   }).join('');
+  var all=$('#prevSelAll');
+  if(all){ all.checked=false; }
 }
 
 // 订阅链接：后台里直接给出可用的 TVBox 订阅地址
@@ -376,19 +456,23 @@ function renderSources(){
         '<option value="tv"'+(cat==='tv'?' selected':'')+'>普通源</option>'+
       '</select></td>'+
       '<td class="tight"><input type="checkbox" name="enabled"'+(s.enabled!==false?' checked':'')+'></td>'+
+      '<td class="small" data-testid="1">'+testBadge(SRCRES[s.url],true)+'</td>'+
+      '<td class="tight"><button class="ghost" data-act="test-src" data-i="'+i+'" title="在线测试该源（下载+解密+解析）">测试</button></td>'+
       '<td class="tight"><button class="ghost" data-act="del-src" data-i="'+i+'">删除</button></td>'+
     '</tr>';
   }).join('');
   var html=card(
     '<h2>源地址清单</h2>'+
     '<p class="muted small">这些是「待下载整理」的源配置地址。<b>只要是 JSON 都会尽量读出内容</b>：标准 TVBox 单配置（含 sites）、多仓格式（含 urls）、以及各种「接口清单」（顶层数组或 data/list/items 里装着 name + api 的条目，会自动补上 type 变成可用站点）。</p>'+
-    '<p class="muted small"><b>分类</b>：选「自动判断」时按关键字识别成人源；如果这个源里全是成人内容、关键字识别不准，直接选「成人源」，它下面的所有站点会强制写进 av.json（选「普通源」同理）。</p>'+
-    '<table><thead><tr><th>备注</th><th>地址</th><th>分类</th><th>启用</th><th></th></tr></thead><tbody id="srcRows">'+rows+'</tbody></table>'+
+    '<p class="muted small"><b>分类</b>：选「自动判断」时按关键字识别成人源；如果这个源里全是成人内容、关键字识别不准，直接选「成人源」，它下面的所有站点会强制写进 av.json（选「普通源」同理）。<b>测试</b>按钮可在线验证单个源：下载 + 自动解密 + 解析，显示耗时与可提取的站点/仓库数量；也可用「测试全部」批量验证。</p>'+
+    '<table><thead><tr><th>备注</th><th>地址</th><th>分类</th><th>启用</th><th style="width:150px">测试结果</th><th style="width:60px">测试</th><th></th></tr></thead><tbody id="srcRows">'+rows+'</tbody></table>'+
     '<div class="toolbar" style="margin-top:12px">'+
       '<button class="ghost" data-act="add-src">新增一行</button>'+
       '<button data-act="save-src">保存清单</button>'+
       '<button class="ghost" data-act="import-src">导入 JSON</button>'+
       '<button class="ghost" data-act="export-src">导出 JSON</button>'+
+      '<button class="ghost" data-act="test-src-all">测试全部</button>'+
+      '<span class="muted small" id="srcStat"></span>'+
     '</div>'+
     '<h2 style="margin-top:22px">批量导入链接</h2>'+
     '<p class="muted small">每行一个地址。可只写地址，也可写成「备注名,地址」。支持一次粘贴几十条，追加到上面表格后再点「保存清单」。</p>'+
@@ -485,19 +569,25 @@ function renderLives(){
       '<td class="tight" style="width:80px"><input name="type" value="'+esc(l.type==null?'':l.type)+'" placeholder="type"></td>'+
       '<td><input name="epg" value="'+esc(l.epg)+'" placeholder="EPG（可空）"></td>'+
       '<td class="tight"><input type="checkbox" name="enabled"'+(l.enabled!==false?' checked':'')+'></td>'+
+      '<td class="small" data-testid="1">'+testBadge(LIVETEST[l.url],'live')+'</td>'+
+      '<td class="tight"><button class="ghost" data-act="test-live" data-i="'+i+'" title="在线测试该直播源">测试</button></td>'+
+      '<td class="tight"><button class="ghost" data-act="live-up" data-i="'+i+'" title="上移">↑</button><button class="ghost" data-act="live-down" data-i="'+i+'" title="下移">↓</button></td>'+
       '<td class="tight"><button class="ghost" data-act="del-live" data-i="'+i+'">删除</button></td>'+
     '</tr>';
   }).join('');
   var html=card(
     '<h2>直播源清单</h2>'+
     '<p class="muted small">这些直播源会在整理时被自动下载检测：<b>只有检测正常的才会写入 tv.json 的 lives 数组，并按检测速度（毫秒）升序排列</b>。'+
+      '「测试」按钮可在线验证单个或全部直播源（显示耗时与内容有效性）；「↑ / ↓」可调整清单顺序（保存清单后生效，同时作为整理时的手动排序依据）。'+
       (liveEnabled?'':'<b>（当前配置已关闭直播源自动更新）</b>')+'</p>'+
-    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>EPG</th><th>启用</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
+    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>EPG</th><th>启用</th><th style="width:110px">测试结果</th><th style="width:60px">测试</th><th style="width:80px">排序</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
     '<div class="toolbar" style="margin-top:12px">'+
       '<button class="ghost" data-act="add-live">新增一行</button>'+
       '<button data-act="save-lives">保存清单</button>'+
       '<button class="ghost" data-act="import-live">导入 JSON</button>'+
       '<button class="ghost" data-act="export-live">导出 JSON</button>'+
+      '<button class="ghost" data-act="test-live-all">测试全部</button>'+
+      '<span class="muted small" id="liveStat"></span>'+
     '</div>'+
     '<h2 style="margin-top:22px">批量导入直播源</h2>'+
     '<p class="muted small">每行一个地址。可只写地址，也可写成「备注名,地址」。追加到上面表格后再点「保存清单」。</p>'+
@@ -516,20 +606,32 @@ function liveResultCard(){
   if(!lives.length){
     return card('<h2>当前 tv.json 中的直播源</h2><p class="muted">暂无。执行一次整理并完成检测后，这里会列出已并入的直播源。</p>');
   }
-  var rows=lives.map(function(l){
-    return '<tr>'+
+  var rows=lives.map(function(l,i){
+    var id=liveIdOf(l);
+    return '<tr data-id="'+esc(id)+'">'+
+      '<td class="muted">'+(i+1)+'</td>'+
       '<td>'+esc(l.name)+'</td>'+
       '<td class="mono">'+esc(l.url)+'</td>'+
       '<td class="tight">'+esc(l.type==null?'':l.type)+'</td>'+
       '<td class="tight muted small">'+(typeof l._latency==='number'?l._latency+'ms':'未测速')+'</td>'+
+      '<td class="tight"><button class="ghost" data-act="lvord-up" title="上移">↑</button><button class="ghost" data-act="lvord-down" title="下移">↓</button></td>'+
     '</tr>';
   }).join('');
   return card(
     '<h2>当前 tv.json 中的直播源（共 '+lives.length+' 条）</h2>'+
-    '<p class="muted small">已按检测速度升序排列，与订阅链接里的 lives 数组一致。</p>'+
-    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>速度</th></tr></thead><tbody>'+rows+'</tbody></table>'
+    '<p class="muted small">默认按检测速度升序排列。用「↑ / ↓」调整顺序后点「保存直播排序」，<b>手动排序会持久保存，重新整理后依然生效</b>。</p>'+
+    '<table><thead><tr><th style="width:40px">#</th><th>名称</th><th>地址</th><th style="width:60px">type</th><th style="width:80px">速度</th><th style="width:80px">排序</th></tr></thead><tbody id="tvLiveRows">'+rows+'</tbody></table>'+
+    '<div class="toolbar" style="margin-top:10px">'+
+      '<button data-act="lvord-save">保存直播排序</button>'+
+      '<button class="ghost" data-act="lvord-reset">重置直播排序</button>'+
+      '<span class="muted small" id="lvordStat"></span>'+
+    '</div>'
   );
 }
+
+// 表格行上移/下移（DOM 移动，保存时按 DOM 顺序收集）
+function moveRowUp(tr){ if(tr&&tr.previousElementSibling) tr.parentNode.insertBefore(tr,tr.previousElementSibling); }
+function moveRowDown(tr){ if(tr&&tr.nextElementSibling) tr.parentNode.insertBefore(tr.nextElementSibling,tr); }
 
 function collectLives(){
   var out=[];
@@ -814,6 +916,8 @@ $('#view').addEventListener('click',function(e){
   if(seg){
     PREV.cat=seg.getAttribute('data-cat');
     $$('#prevSeg .seg-btn').forEach(function(b){ b.classList.toggle('active',b===seg); });
+    PREV.ids=null;   // 切换分类时清除排序编辑状态
+    PREV.sel={};     // 清除勾选状态
     renderPreviewTable();
     return;
   }
@@ -848,6 +952,19 @@ $('#view').addEventListener('input',function(e){
   if(auInp){ updateIntervalHint(); return; }
 });
 
+$('#view').addEventListener('change',function(e){
+  if(e.target&&e.target.id==='prevSelAll'){
+    $$('#prevRows input.prev-sel').forEach(function(c){
+      c.checked=e.target.checked;
+      PREV.sel[c.getAttribute('data-url')]=e.target.checked;
+    });
+    return;
+  }
+  if(e.target&&e.target.classList&&e.target.classList.contains('prev-sel')){
+    PREV.sel[e.target.getAttribute('data-url')]=e.target.checked;
+  }
+});
+
 // 将间隔小时数转成可读描述
 function formatInterval(hours){
   hours=Math.max(1,Math.min(8784,Math.round(Number(hours)||1)));
@@ -876,9 +993,135 @@ function handle(act,btn){
   if(act==='force') return runPipeline('start?force=1');
   if(act==='step') return runPipeline('step');
 
+  // —— 源预览：站点在线测速（单个勾选 / 全部） ——
+  if(act==='test-sites-sel'||act==='test-sites-all'){
+    var turls;
+    if(act==='test-sites-sel'){
+      turls=$$('#prevRows input.prev-sel').filter(function(c){ return c.checked; }).map(function(c){ return c.getAttribute('data-url'); }).filter(Boolean);
+      if(!turls.length){ toast('请先勾选要测试的源（单个或多个均可）'); return Promise.resolve(); }
+    }else{
+      turls=prevSites().map(function(s){ return s.api; }).filter(function(u){ return /^https?:\/\//i.test(String(u||'')); }).slice(0,60);
+      if(!turls.length){ toast('没有可测试的接口地址（csp_ 爬虫需本地解析，无法在线测速）'); return Promise.resolve(); }
+    }
+    var tst=document.getElementById('prevStat'); if(tst) tst.textContent='准备测速…';
+    return testUrls('site',turls,PREV.test,'prevStat',function(){ renderPreviewTable(); },function(){
+      var s2=document.getElementById('prevStat');
+      if(s2) s2.textContent='测速完成（结果临时显示，不写回配置）';
+    });
+  }
+  // —— 源预览：手动排序（↑/↓ 交换，保存到后台持久化） ——
+  if(act==='ord-up'){ prevMove(btn.getAttribute('data-id'),-1); return Promise.resolve(); }
+  if(act==='ord-down'){ prevMove(btn.getAttribute('data-id'),1); return Promise.resolve(); }
+  if(act==='save-order'){
+    prevEnsureIds();
+    if(!PREV.ids.length){ toast('当前分类没有源'); return Promise.resolve(); }
+    return req('POST','/api/admin/order',{kind:PREV.cat,ids:PREV.ids}).then(function(){
+      toast('排序已保存并写入当前订阅文件，重新整理后依然生效');
+      PREV.ids=null;
+      return loadFiles().then(render);
+    });
+  }
+  if(act==='reset-order'){
+    return req('POST','/api/admin/order',{kind:PREV.cat,ids:[]}).then(function(){
+      toast('已恢复默认排序（按测速速度）');
+      PREV.ids=null;
+      return loadFiles().then(render);
+    });
+  }
+
+  // —— 源地址清单：单条 / 全部在线测试（下载+解密+解析） ——
+  if(act==='test-src'){
+    var row=btn.closest('tr');
+    var surl=row.querySelector('[name=url]').value.trim();
+    if(!/^https?:\/\//i.test(surl)){ toast('请先填写有效的源地址（http/https）'); return Promise.resolve(); }
+    var scell=row.querySelector('[data-testid]');
+    if(scell) scell.innerHTML='<span class="lat na">测试中…</span>';
+    return req('POST','/api/admin/test',{kind:'source',urls:[surl]}).then(function(d){
+      var r=(d.results||[])[0]||{ok:false,error:'无结果'};
+      SRCRES[surl]=r;
+      if(scell) scell.innerHTML=testBadge(r,true);
+    });
+  }
+  if(act==='test-src-all'){
+    var surls=[];
+    $$('#srcRows tr').forEach(function(tr){
+      var u=tr.querySelector('[name=url]').value.trim();
+      if(/^https?:\/\//i.test(u)) surls.push(u);
+    });
+    if(!surls.length){ toast('清单里没有有效的源地址'); return Promise.resolve(); }
+    if(surls.length>60){ surls=surls.slice(0,60); toast('地址较多，本次测试前 60 条'); }
+    var sst=document.getElementById('srcStat'); if(sst) sst.textContent='准备测速…';
+    return testUrls('source',surls,SRCRES,'srcStat',function(){
+      $$('#srcRows tr').forEach(function(tr){
+        var u=tr.querySelector('[name=url]').value.trim();
+        var c=tr.querySelector('[data-testid]');
+        if(c&&SRCRES[u]) c.innerHTML=testBadge(SRCRES[u],true);
+      });
+    },function(){
+      var s2=document.getElementById('srcStat');
+      if(s2) s2.textContent='测试完成';
+    });
+  }
+
+  // —— 直播源清单：单条 / 全部在线测试 ——
+  if(act==='test-live'){
+    var lrow=btn.closest('tr');
+    var lurl=lrow.querySelector('[name=url]').value.trim();
+    if(!/^https?:\/\//i.test(lurl)){ toast('请先填写有效的直播源地址'); return Promise.resolve(); }
+    var lcell=lrow.querySelector('[data-testid]');
+    if(lcell) lcell.innerHTML='<span class="lat na">测试中…</span>';
+    return req('POST','/api/admin/test',{kind:'live',urls:[lurl]}).then(function(d){
+      var r=(d.results||[])[0]||{ok:false,error:'无结果'};
+      LIVETEST[lurl]=r;
+      if(lcell) lcell.innerHTML=testBadge(r,'live');
+    });
+  }
+  if(act==='test-live-all'){
+    var lurls=[];
+    $$('#liveRows tr').forEach(function(tr){
+      var u=tr.querySelector('[name=url]').value.trim();
+      if(/^https?:\/\//i.test(u)) lurls.push(u);
+    });
+    if(!lurls.length){ toast('清单里没有有效的直播源地址'); return Promise.resolve(); }
+    if(lurls.length>60){ lurls=lurls.slice(0,60); toast('地址较多，本次测试前 60 条'); }
+    var lst=document.getElementById('liveStat'); if(lst) lst.textContent='准备测速…';
+    return testUrls('live',lurls,LIVETEST,'liveStat',function(){
+      $$('#liveRows tr').forEach(function(tr){
+        var u=tr.querySelector('[name=url]').value.trim();
+        var c=tr.querySelector('[data-testid]');
+        if(c&&LIVETEST[u]) c.innerHTML=testBadge(LIVETEST[u],'live');
+      });
+    },function(){
+      var s2=document.getElementById('liveStat');
+      if(s2) s2.textContent='测试完成';
+    });
+  }
+  // —— 直播源清单：行上移/下移（DOM 移动，保存清单后生效） ——
+  if(act==='live-up'){ moveRowUp(btn.closest('tr')); return Promise.resolve(); }
+  if(act==='live-down'){ moveRowDown(btn.closest('tr')); return Promise.resolve(); }
+
+  // —— tv.json 直播源：手动排序（持久化） ——
+  if(act==='lvord-up'){ moveRowUp(btn.closest('tr')); return Promise.resolve(); }
+  if(act==='lvord-down'){ moveRowDown(btn.closest('tr')); return Promise.resolve(); }
+  if(act==='lvord-save'){
+    var lids=$$('#tvLiveRows tr').map(function(tr){ return tr.getAttribute('data-id'); }).filter(Boolean);
+    if(!lids.length){ toast('没有可排序的直播源'); return Promise.resolve(); }
+    var lst2=document.getElementById('lvordStat'); if(lst2) lst2.textContent='保存中…';
+    return req('POST','/api/admin/order',{kind:'lives',ids:lids}).then(function(){
+      toast('直播源排序已保存并写入 tv.json，重新整理后依然生效');
+      return loadFiles().then(render);
+    });
+  }
+  if(act==='lvord-reset'){
+    return req('POST','/api/admin/order',{kind:'lives',ids:[]}).then(function(){
+      toast('已恢复默认排序（按测速速度）');
+      return loadFiles().then(render);
+    });
+  }
+
   if(act==='add-src'){
     var tr=document.createElement('tr');
-    tr.innerHTML='<td><input name="name" placeholder="备注名"></td><td><input name="url" placeholder="https://.../config.json"></td>'+CATEGORY_SELECT+'<td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-src">删除</button></td>';
+    tr.innerHTML='<td><input name="name" placeholder="备注名"></td><td><input name="url" placeholder="https://.../config.json"></td>'+CATEGORY_SELECT+'<td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-src" title="在线测试该源（下载+解密+解析）">测试</button></td><td class="tight"><button class="ghost" data-act="del-src">删除</button></td>';
     $('#srcRows').appendChild(tr); return Promise.resolve();
   }
   if(act==='bulk-src'){
@@ -918,7 +1161,7 @@ function handle(act,btn){
 
   if(act==='add-live'){
     var ltr=document.createElement('tr');
-    ltr.innerHTML='<td><input name="name" placeholder="直播源名"></td><td><input name="url" placeholder="https://.../live.m3u"></td><td style="width:80px"><input name="type" placeholder="type"></td><td><input name="epg" placeholder="EPG（可空）"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+    ltr.innerHTML='<td><input name="name" placeholder="直播源名"></td><td><input name="url" placeholder="https://.../live.m3u"></td><td style="width:80px"><input name="type" placeholder="type"></td><td><input name="epg" placeholder="EPG（可空）"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
     $('#liveRows').appendChild(ltr); return Promise.resolve();
   }
   if(act==='bulk-live'){
@@ -936,7 +1179,7 @@ function handle(act,btn){
       }
       if(!/^https?:/i.test(url)){ lskipped+=1; return; }
       var tr=document.createElement('tr');
-      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td><td style="width:80px"><input name="type"></td><td><input name="epg"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td><td style="width:80px"><input name="type"></td><td><input name="epg"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
       $('#liveRows').appendChild(tr);
       ladded+=1;
     });

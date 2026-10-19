@@ -15,6 +15,9 @@ export function isTestable(site) {
   return true;
 }
 
+/** 源文件下载上限（字节）：防止异常大的文件撑爆 Worker 内存 */
+const SOURCE_MAX_BYTES = 2 * 1024 * 1024;
+
 export async function fetchText(url, timeoutMs = 8000) {
   const res = await fetch(url, {
     method: 'GET',
@@ -23,9 +26,8 @@ export async function fetchText(url, timeoutMs = 8000) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const buffer = await res.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  const text = new TextDecoder('utf-8').decode(bytes);
+  // 限长读取：TVBox 配置都在几百 KB 以内，2MB 足够；超出部分截断不影响解析
+  const { text, bytes } = await readLimited(res, SOURCE_MAX_BYTES);
   // 尝试解密（base64 / 图片伪装等），解密失败则用原始文本
   const decrypted = decryptContent(text, bytes);
   return decrypted || text;

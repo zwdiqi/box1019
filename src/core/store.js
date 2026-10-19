@@ -4,6 +4,8 @@
  * 注意：Workers KV 是最终一致的，写入后立刻 get 不保证读到新值，
  * 因此所有写接口都应把新值直接放在响应体里返回，前端不要「写完再读」。
  */
+import { serializeConfig } from './normalize.js';
+
 export function kv(env) {
   return env.TVBOX_KV;
 }
@@ -32,6 +34,12 @@ export async function getJSON(env, key, fallback = null) {
 
 export async function putJSON(env, key, value) {
   await kv(env).put(key, JSON.stringify(value));
+  return value;
+}
+
+/** 写入 TVBox 订阅配置文件（tv.json / av.json 等）：标准排版序列化 */
+export async function putConfig(env, key, value) {
+  await kv(env).put(key, serializeConfig(value));
   return value;
 }
 

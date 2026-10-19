@@ -16,6 +16,7 @@ export const KEY = {
   PIPELINE: 'pipeline',
   SUBS: 'subs',
   LIVES: 'lives',
+  ORDER: 'order',
   SESSION_SECRET: 'secret:session',
 };
 

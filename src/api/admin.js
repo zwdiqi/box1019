@@ -13,11 +13,15 @@ import {
   verifyPassword,
 } from '../core/auth.js';
 import { KEY } from '../core/keys.js';
+import { isValidLiveText, liveId } from '../core/lives.js';
+import { applyManualOrder } from '../core/merge.js';
 import { continueRun, getPipelineState, pipelineProgress, startRun } from '../core/pipeline.js';
+import { parseConfig } from '../core/normalize.js';
 import { normalizeSchedule } from '../core/schedule.js';
 import { DEFAULT_CONFIG, loadConfig } from '../core/sources.js';
-import { getJSON, putJSON } from '../core/store.js';
-import { asArray, clampString, fail, isPlainObject, ok, readJsonBody, safeShallowCopy } from '../core/util.js';
+import { fetchLimited, fetchText, mapLimit, probe } from '../core/speedtest.js';
+import { getJSON, putConfig, putJSON } from '../core/store.js';
+import { asArray, clampString, fail, isPlainObject, nowIso, ok, readJsonBody, safeShallowCopy } from '../core/util.js';
 
 const SUB_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const SUB_RESERVED = new Set(['tv', 'av', 'index', 'admin', 'api', 'assets', 'favicon', 'robots']);
@@ -288,6 +292,113 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
       deadlineMs: 22000,
     });
     return ok({ finished: result.finished, pipeline: pipelineProgress(result.state) });
+  }
+
+  // —— 单个 / 批量测速（source=源配置地址 site=站点接口 live=直播源） ——
+  // 单次最多 20 个地址、并发 5，控制在免费版 50 子请求限额内
+  if (path === 'test' && method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(request, 256 * 1024);
+    } catch {
+      return fail('请求体格式不正确');
+    }
+    const kind = body.kind === 'live' || body.kind === 'source' ? body.kind : 'site';
+    const urls = asArray(body.urls)
+      .map((u) => clampString(u, 1000).trim())
+      .filter((u) => /^https?:\/\//i.test(u))
+      .slice(0, 20);
+    if (!urls.length) return fail('请提供要测试的地址');
+    const cfg = await loadConfig(env);
+
+    if (kind === 'source') {
+      // 源配置地址：下载 + 解密 + 解析，报告可提取的站点/仓库数量
+      const results = await mapLimit(urls, 5, async (u) => {
+        const t0 = Date.now();
+        try {
+          const text = await fetchText(u, cfg.fetchTimeoutMs);
+          const parsed = parseConfig(text, u);
+          if (parsed.kind === 'config') return { url: u, ok: true, ms: Date.now() - t0, sites: parsed.sites.length };
+          if (parsed.kind === 'repo') return { url: u, ok: true, ms: Date.now() - t0, repos: parsed.repos.length };
+          return { url: u, ok: false, ms: Date.now() - t0, error: parsed.reason || '无法识别内容' };
+        } catch (e) {
+          return { url: u, ok: false, ms: Date.now() - t0, error: (e && e.message) || String(e) };
+        }
+      });
+      return ok({ kind, results });
+    }
+
+    if (kind === 'live') {
+      // 直播源：下载限长正文，判定有效性（过短 / HTML 错误页视为无效）
+      const results = await mapLimit(urls, 5, async (u) => {
+        const r = await fetchLimited(u, cfg.liveTimeoutMs, 65536);
+        const valid = r.ok && isValidLiveText(r.text, cfg.liveMinBytes);
+        return {
+          url: u,
+          ok: !!r.ok,
+          valid,
+          ms: r.ms,
+          status: r.status,
+          error: !r.ok ? (r.error || 'unreachable') : valid ? undefined : '内容无效（过短或非列表）',
+        };
+      });
+      return ok({ kind, results });
+    }
+
+    // 站点接口：测 TTFB（拿到响应头即算连通）
+    const results = await mapLimit(urls, 5, async (u) => {
+      const r = await probe(u, cfg.probeTimeoutMs);
+      return { url: u, ok: !!r.ok, ms: r.ms, status: r.status, error: r.ok ? undefined : (r.error || 'unreachable') };
+    });
+    return ok({ kind, results });
+  }
+
+  // —— 手动排序（tv / av 站点、lives 直播源）：保存到 KV 并立即重写当前订阅文件 ——
+  if (path === 'order' && method === 'GET') {
+    const order = await getJSON(env, KEY.ORDER, {});
+    return ok(isPlainObject(order) ? order : {});
+  }
+  if (path === 'order' && method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(request, 1024 * 1024);
+    } catch {
+      return fail('请求体格式不正确');
+    }
+    const kind = body.kind;
+    if (kind !== 'tv' && kind !== 'av' && kind !== 'lives') return fail('不支持的排序类型', 400);
+    // ids 为空 = 重置为默认（按测速）排序
+    const ids = asArray(body.ids).map((v) => clampString(v, 300)).filter(Boolean);
+    if (ids.length > 5000) return fail('排序条目过多');
+    const nextMap = {};
+    ids.forEach((id, i) => { nextMap[id] = i; });
+
+    const cur = await getJSON(env, KEY.ORDER, {});
+    const order = isPlainObject(cur) ? cur : {};
+
+    if (kind === 'lives') {
+      order.lives = nextMap;
+      await putJSON(env, KEY.ORDER, order);
+      const file = await getJSON(env, KEY.TV, null);
+      if (isPlainObject(file) && Array.isArray(file.lives)) {
+        file.lives = applyManualOrder(file.lives, nextMap, (l) => (l && l._id) || liveId(l));
+        if (isPlainObject(file._meta)) file._meta.updated = nowIso();
+        await putConfig(env, KEY.TV, file);
+      }
+      return ok({ order });
+    }
+
+    if (!isPlainObject(order.sites)) order.sites = {};
+    order.sites[kind] = nextMap;
+    await putJSON(env, KEY.ORDER, order);
+    const outKey = kind === 'tv' ? KEY.TV : KEY.AV;
+    const file = await getJSON(env, outKey, null);
+    if (isPlainObject(file) && Array.isArray(file.sites)) {
+      file.sites = applyManualOrder(file.sites, nextMap);
+      if (isPlainObject(file._meta)) file._meta.updated = nowIso();
+      await putConfig(env, outKey, file);
+    }
+    return ok({ order });
   }
 
   // —— 源地址清单 ——

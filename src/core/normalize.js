@@ -155,6 +155,49 @@ export function buildSite(raw, baseUrl) {
 
 const ENVELOPE_KEYS = ['spider', 'lives'];
 
+/**
+ * 按 TVBox 订阅源的标准排版序列化配置：
+ *  - 顶层键顺序：spider → sites → lives → 其余 → _meta（最后）
+ *  - 站点字段顺序：key/name/type/api/searchable/quickSearch/filterable/ext/jar…，内部字段（_latency/_id）放最后
+ *  - 直播源字段顺序：name/type/url/epg/playerType…，内部字段放最后
+ *  - 2 空格缩进的美化输出（与常见 TVBox 订阅文件一致）
+ */
+const CONFIG_KEY_ORDER = ['spider', 'wallpaper', 'sites', 'lives', 'parses', 'flags', 'ijk', 'doh', 'rules', 'ads'];
+const SITE_KEY_ORDER = ['key', 'name', 'type', 'api', 'searchable', 'quickSearch', 'filterable', 'ext', 'jar', 'playerType', 'ua', 'header', 'timeout'];
+const LIVE_KEY_ORDER = ['name', 'type', 'url', 'epg', 'playerType', 'ua', 'header', 'logo'];
+
+function orderFields(obj, order, tailKeys) {
+  const out = {};
+  for (const k of order) {
+    if (obj[k] !== undefined) out[k] = obj[k];
+  }
+  for (const k of Object.keys(obj)) {
+    if (!(k in out) && !tailKeys.includes(k)) out[k] = obj[k];
+  }
+  for (const k of tailKeys) {
+    if (obj[k] !== undefined) out[k] = obj[k];
+  }
+  return out;
+}
+
+export function serializeConfig(data) {
+  const out = {};
+  for (const k of CONFIG_KEY_ORDER) {
+    if (data[k] !== undefined) out[k] = data[k];
+  }
+  for (const k of Object.keys(data)) {
+    if (!(k in out) && k !== '_meta') out[k] = data[k];
+  }
+  if (data._meta !== undefined) out._meta = data._meta;
+  if (Array.isArray(out.sites)) {
+    out.sites = out.sites.map((s) => (isPlainObject(s) ? orderFields(s, SITE_KEY_ORDER, ['_latency', '_id']) : s));
+  }
+  if (Array.isArray(out.lives)) {
+    out.lives = out.lives.map((l) => (isPlainObject(l) ? orderFields(l, LIVE_KEY_ORDER, ['_latency', '_id']) : l));
+  }
+  return JSON.stringify(out, null, 2);
+}
+
 /** 提取 TVBox 信封（spider / lives），并解析其中的相对路径；不含 sites */
 export function buildEnvelope(envelope, baseUrl) {
   const out = {};

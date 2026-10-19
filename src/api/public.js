@@ -3,6 +3,7 @@
  * 全部无需登录，供 TVBox 与公开页使用。
  */
 import { KEY } from '../core/keys.js';
+import { serializeConfig } from '../core/normalize.js';
 import { ensureBootstrap, loadConfig } from '../core/sources.js';
 import { getJSON, rawGet } from '../core/store.js';
 import { asArray, nowIso, ok, rawJson } from '../core/util.js';
@@ -95,7 +96,7 @@ export async function serveCustom(env, name) {
   const def = asArray(subs).find((s) => s && s.name === name);
   if (!def) return null;
   const file = await buildCustomFile(env, def);
-  return rawJson(JSON.stringify(file, null, 2), { headers: { 'Cache-Control': FILE_CACHE } });
+  return rawJson(serializeConfig(file), { headers: { 'Cache-Control': FILE_CACHE } });
 }
 
 /** 公开页用的轻量状态：只读 meta:lastRun 与 subs，避免拉取大文件 */

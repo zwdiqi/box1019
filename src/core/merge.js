@@ -69,6 +69,23 @@ export function sortBySpeed(sites) {
 }
 
 /**
+ * 手动排序：orderMap 里登记过的条目按登记顺序排前，未登记的保持原有相对顺序（稳定排序）。
+ * 用于把后台「手动排序」的结果套用到站点与直播源上，未登记的仍按测速排序。
+ * @param {any[]} items 已排序（如按速度）的条目
+ * @param {Record<string, number>} orderMap id -> 顺序索引
+ * @param {(item:any)=>string} [idFn] 取 id 的函数，默认读 item._id
+ */
+export function applyManualOrder(items, orderMap, idFn) {
+  if (!isPlainObject(orderMap)) return items;
+  const getId = idFn || ((x) => x && x._id);
+  const idxOf = (item) => {
+    const v = orderMap[getId(item)];
+    return Number.isFinite(v) ? v : Infinity;
+  };
+  return [...items].sort((a, b) => idxOf(a) - idxOf(b));
+}
+
+/**
  * 裁剪成 TVBox 可用的站点对象：去掉内部字段，但保留 _latency 与 _id。
  * 保留 _id 是为了让前端能引用「自动源」的稳定标识来写 overrides / blocklist。
  * 下划线开头的额外字段 TVBox 会忽略，不影响订阅可用性。

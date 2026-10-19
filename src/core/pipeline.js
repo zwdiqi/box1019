@@ -10,11 +10,11 @@
 import { classifyByContent, classifySite } from './classify.js';
 import { KEY, TMP } from './keys.js';
 import { dedupeLives, isValidLiveText, isTestableLive, liveId, sortLivesBySpeed, stripLive, toOutputLive } from './lives.js';
-import { dedupeById, mergeUserState, prepareManual, sortBySpeed, toOutputSite } from './merge.js';
+import { applyManualOrder, dedupeById, mergeUserState, prepareManual, sortBySpeed, toOutputSite } from './merge.js';
 import { buildEnvelope, buildSite, parseConfig, siteId } from './normalize.js';
 import { getEnabledSources, loadConfig } from './sources.js';
 import { fetchLimited, fetchText, isTestable, mapLimit, probe } from './speedtest.js';
-import { del, deletePrefix, getJSON, getManyJSON, listKeys, putJSON } from './store.js';
+import { del, deletePrefix, getJSON, getManyJSON, listKeys, putConfig, putJSON } from './store.js';
 import { isPlainObject, nowIso, randomHex } from './util.js';
 
 const MAX_ERRORS = 200;
@@ -269,12 +269,13 @@ async function tickRank(env, state, ctx) {
     }
   }
 
-  const [overrides, blocklist, manual, base, liveRaw] = await Promise.all([
+  const [overrides, blocklist, manual, base, liveRaw, orderRaw] = await Promise.all([
     getJSON(env, KEY.OVERRIDES, {}),
     getJSON(env, KEY.BLOCKLIST, []),
     getJSON(env, KEY.MANUAL, { av: [], tv: [] }),
     getJSON(env, TMP.base(state.runId), null),
     getJSON(env, TMP.live(state.runId), []),
+    getJSON(env, KEY.ORDER, {}),
   ]);
 
   const alive = collected.filter((s) => s._ok !== false);
@@ -290,8 +291,11 @@ async function tickRank(env, state, ctx) {
   const autoTv = withUserState.filter((s) => s._cat === 'av' ? false : true);
   const autoAv = withUserState.filter((s) => s._cat === 'av');
 
-  const tvSites = sortBySpeed(dedupeById([...autoTv, ...manualTv])).map(toOutputSite);
-  const avSites = sortBySpeed(dedupeById([...autoAv, ...manualAv])).map(toOutputSite);
+  // 套用后台手动排序：登记过的条目按登记顺序排前，未登记的按测速排序
+  const order = isPlainObject(orderRaw) ? orderRaw : {};
+  const siteOrderOf = (cat) => (isPlainObject(order.sites) && isPlainObject(order.sites[cat])) ? order.sites[cat] : {};
+  const tvSites = applyManualOrder(sortBySpeed(dedupeById([...autoTv, ...manualTv])), siteOrderOf('tv')).map(toOutputSite);
+  const avSites = applyManualOrder(sortBySpeed(dedupeById([...autoAv, ...manualAv])), siteOrderOf('av')).map(toOutputSite);
 
   const envelope = (base && base.envelope) || {};
   const stamp = nowIso();
@@ -302,10 +306,15 @@ async function tickRank(env, state, ctx) {
     dead,
   };
 
-  // 直播源：只保留检测有效的（未测速的也保留），按测速升序；再与基础配置里的 lives 去重合并
+  // 直播源：只保留检测有效的（未测速的也保留），按测速升序；再与基础配置里的 lives 去重合并；最后套用手动排序
   const testedLives = (Array.isArray(liveRaw) ? liveRaw : []).filter((l) => l && l._ok !== false);
   const envelopeLives = Array.isArray(envelope.lives) ? envelope.lives.filter(isPlainObject) : [];
-  const lives = sortLivesBySpeed(dedupeLives([...testedLives, ...envelopeLives])).map(toOutputLive);
+  const liveOrderMap = isPlainObject(order.lives) ? order.lives : {};
+  const lives = applyManualOrder(
+    sortLivesBySpeed(dedupeLives([...testedLives, ...envelopeLives])),
+    liveOrderMap,
+    (l) => (l && l._id) || liveId(l),
+  ).map(toOutputLive);
 
   const tvFile = {
     ...envelope,
@@ -326,8 +335,8 @@ async function tickRank(env, state, ctx) {
     _meta: { generator: 'tvbox-organizer', category: 'av', updated: stamp, count: avSites.length, ...common },
   };
 
-  await putJSON(env, KEY.TV, tvFile);
-  await putJSON(env, KEY.AV, avFile);
+  await putConfig(env, KEY.TV, tvFile);
+  await putConfig(env, KEY.AV, avFile);
   await putJSON(env, KEY.BASE, { sourceUrl: base ? base.sourceUrl : null, envelope, updatedAt: stamp });
 
   state.counts.tv = tvSites.length;
