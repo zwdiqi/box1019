@@ -592,7 +592,8 @@ function collectSubs(){
 }
 
 // 配置
-var DAY_LABELS={1:'周一',2:'周二',3:'周三',4:'周四',5:'周五',6:'周六',7:'周日'};
+function dayRange(){ var out=[]; for(var i=1;i<=31;i++){ out.push(i); } return out; }
+var DAY_OF_MONTH_LABELS={}; (function(){ for(var i=1;i<=31;i++){ DAY_OF_MONTH_LABELS[i]=i+'日'; } })();
 function pad2(v){ v=String(v); return v.length<2?'0'+v:v; }
 function hourRange(){ var out=[]; for(var i=0;i<24;i++){ out.push(i); } return out; }
 function optionList(list,selected,labels){
@@ -607,16 +608,16 @@ function renderConfig(){
   var au=c.autoUpdate||{};
   var html=card(
     '<h2>自动更新时间</h2>'+
-    '<p class="muted small">每周定时执行一次整理，时间为<b>北京时间</b>。到点检测由每 15 分钟一次的心跳任务完成，所以分钟只能选 0 / 15 / 30 / 45（例：周一 11:00 北京 = 周一 03:00 UTC）。</p>'+
+    '<p class="muted small">每月定时执行一次整理，时间为<b>北京时间</b>。到点检测由每 15 分钟一次的心跳任务完成，所以分钟只能选 0 / 15 / 30 / 45（例：每月 1 号 11:00 北京）。</p>'+
     '<div class="row" style="margin-bottom:10px">'+
       '<label class="row small"><input type="checkbox" id="au"'+(au.enabled!==false?' checked':'')+'> 启用自动更新</label>'+
     '</div>'+
     '<div class="grid">'+
-      '<div class="stat"><div class="k">星期</div><select id="auDay">'+optionList([1,2,3,4,5,6,7], au.weekday==null?1:au.weekday, DAY_LABELS)+'</select></div>'+
+      '<div class="stat"><div class="k">日期</div><select id="auDay">'+optionList(dayRange(), au.day==null?1:au.day, DAY_OF_MONTH_LABELS)+'</select></div>'+
       '<div class="stat"><div class="k">小时</div><select id="auHour">'+optionList(hourRange(), au.hour==null?11:au.hour)+'</select></div>'+
       '<div class="stat"><div class="k">分钟</div><select id="auMin">'+optionList([0,15,30,45], au.minute==null?0:au.minute)+'</select></div>'+
     '</div>'+
-    '<p class="muted small" style="margin-top:10px">改完点最下方的「保存配置」生效，不需要重新部署。</p>'
+    '<p class="muted small" style="margin-top:10px">改完点最下方的「保存配置」生效，不需要重新部署。若设定的「几号」超过当月天数，自动取当月最后一天。</p>'
   );
   html+=card(
     '<h2>直播源自动更新</h2>'+
@@ -677,7 +678,7 @@ function collectConfig(){
   cfg.liveEnabled=$('#lvEn').checked;
   cfg.autoUpdate={
     enabled:$('#au').checked,
-    weekday:Number($('#auDay').value),
+    day:Number($('#auDay').value),
     hour:Number($('#auHour').value),
     minute:Number($('#auMin').value)
   };

@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG = {
   tickSubrequestBudget: 45,
   // 心跳 cron（每 15 分钟）的单次预算，同样按免费版上限预置
   heartbeatSubrequestBudget: 40,
-  // 一次 tick 的墙钟时间预算（毫秒）。周更 cron 的墙钟上限为 15 分钟
+  // 一次 tick 的墙钟时间预算（毫秒）。大预算 cron 的墙钟上限为 15 分钟
   tickTimeBudgetMs: 780000,
   heartbeatEnabled: true,
   customFilesEnabled: true,
@@ -43,9 +43,9 @@ export const DEFAULT_CONFIG = {
   liveTimeoutMs: 12000,
   // 正文长度下限（字节）：过短视为无效（多为错误页或空列表）
   liveMinBytes: 200,
-  // 自动更新时间（北京时间）。默认周一 11:00（北京）= 周一 03:00 UTC，
-  // 与 wrangler.jsonc 里的周更 cron 一致；分钟后端只接受 0/15/30/45。
-  autoUpdate: { enabled: true, weekday: 1, hour: 11, minute: 0 },
+  // 自动更新时间（北京时间）。默认每月 1 号 11:00（北京）；
+  // 分钟后端只接受 0/15/30/45。
+  autoUpdate: { enabled: true, day: 1, hour: 11, minute: 0 },
 };
 
 let bootstrapped = false;

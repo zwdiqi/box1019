@@ -25,7 +25,10 @@ export async function fetchText(url, timeoutMs = 8000) {
   return res.text();
 }
 
-export async function probe(url, timeoutMs = 8000) {
+/** 探测正文读取上限（字节）：用于测速同时抓取内容做成人/普通分类 */
+export const PROBE_BODY_MAX_BYTES = 32 * 1024;
+
+export async function probe(url, timeoutMs = 8000, maxBytes = PROBE_BODY_MAX_BYTES) {
   const t0 = Date.now();
   try {
     const res = await fetch(url, {
@@ -35,16 +38,12 @@ export async function probe(url, timeoutMs = 8000) {
       signal: AbortSignal.timeout(timeoutMs),
     });
     const ms = Date.now() - t0;
-    if (res.body) {
-      try {
-        await res.body.cancel();
-      } catch {
-        /* 忽略取消流的异常 */
-      }
-    }
-    return { ok: true, ms, status: res.status };
+    // 读取有限正文：既测 TTFB，又拿到内容用于成人源识别
+    // 无论 HTTP 状态码如何（403/404 也算连通），都尝试读取正文以做分类
+    const text = await readLimited(res, maxBytes);
+    return { ok: true, ms, status: res.status, text };
   } catch (e) {
-    return { ok: false, ms: Date.now() - t0, status: 0, error: (e && e.message) || String(e) };
+    return { ok: false, ms: Date.now() - t0, status: 0, text: '', error: (e && e.message) || String(e) };
   }
 }
 

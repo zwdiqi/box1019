@@ -7,7 +7,7 @@
  * 一次调用跑不完整个整理流程。因此每个阶段都按「预算」切成多个 tick，
  * 进度写在单个 pipeline key 上（写频率节流 ≥1.5 秒，避免撞 KV「单 key 1 写/秒」）。
  */
-import { classifySite } from './classify.js';
+import { classifyByContent, classifySite } from './classify.js';
 import { KEY, TMP } from './keys.js';
 import { dedupeLives, isValidLiveText, isTestableLive, liveId, sortLivesBySpeed, stripLive, toOutputLive } from './lives.js';
 import { dedupeById, mergeUserState, prepareManual, sortBySpeed, toOutputSite } from './merge.js';
@@ -133,6 +133,7 @@ async function tickSpeed(env, state, ctx) {
     }
 
     const flags = chunk.map(isTestable);
+    // 不可测的站点（type 3 / 非 http）先用 api 网址兜底分类
     for (const site of chunk) {
       const forced = site._srcCat;
       site._cat = forced === 'av' || forced === 'tv' ? forced : classifySite(site, cfg.adultKeywords);
@@ -159,6 +160,10 @@ async function tickSpeed(env, state, ctx) {
         site._ok = true;
         site._ms = r.ms;
         state.counts.alive += 1;
+        // 可测站点用接口返回的正文内容重新分类（比仅看 api 网址更准确）
+        if (site._srcCat !== 'av' && site._srcCat !== 'tv') {
+          site._cat = classifyByContent(r.text || '', cfg.adultKeywords);
+        }
       } else {
         site._ok = false;
         site._ms = null;

@@ -4,7 +4,7 @@
 import { isPlainObject } from './util.js';
 
 const INTERNAL_FIELDS = ['_id', '_cat', '_srcCat', '_ms', '_ok', '_err', '_edited', '_manual', '_latency'];
-const EXTRA_STRIP = ['category', 'hidden', 'group'];
+const EXTRA_STRIP = ['category', 'categories', 'hidden', 'group'];
 
 /** 套用用户对自动源的修改与删除（写入 overrides / blocklist） */
 export function mergeUserState(sites, overrides, blocklist) {
