@@ -16,7 +16,7 @@ import { KEY } from '../core/keys.js';
 import { isValidLiveText, liveId } from '../core/lives.js';
 import { applyManualOrder } from '../core/merge.js';
 import { continueRun, getPipelineState, pipelineProgress, startRun } from '../core/pipeline.js';
-import { parseConfig } from '../core/normalize.js';
+import { parseConfig, siteId } from '../core/normalize.js';
 import { normalizeSchedule } from '../core/schedule.js';
 import { DEFAULT_CONFIG, loadConfig } from '../core/sources.js';
 import { fetchLimited, fetchText, mapLimit, probe } from '../core/speedtest.js';
@@ -459,6 +459,45 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
     const blocklist = sanitizeBlocklist(isPlainObject(body) && 'blocklist' in body ? body.blocklist : body);
     await putJSON(env, KEY.BLOCKLIST, blocklist);
     return ok({ blocklist });
+  }
+
+  // —— 彻底删除：立即从当前 tv.json / av.json 移除该源，同时确保 blocklist 拦截后续整理重新加入 ——
+  if (path === 'purge' && method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(request, 64 * 1024);
+    } catch {
+      return fail('请求体格式不正确');
+    }
+    const id = clampString(isPlainObject(body) ? body.id : '', 200).trim();
+    if (!id) return fail('缺少源 ID');
+
+    const blocklist = sanitizeBlocklist(await getJSON(env, KEY.BLOCKLIST, []));
+    if (!blocklist.includes(id)) blocklist.push(id);
+    await putJSON(env, KEY.BLOCKLIST, blocklist);
+
+    const overrides = await getJSON(env, KEY.OVERRIDES, {});
+    if (isPlainObject(overrides) && overrides[id]) {
+      delete overrides[id];
+      await putJSON(env, KEY.OVERRIDES, overrides);
+    }
+
+    let removed = 0;
+    for (const outKey of [KEY.TV, KEY.AV]) {
+      const file = await getJSON(env, outKey, null);
+      if (!isPlainObject(file) || !Array.isArray(file.sites)) continue;
+      const next = file.sites.filter((s) => {
+        const sid = isPlainObject(s) ? String(s._id || siteId(s) || '') : '';
+        return sid !== id;
+      });
+      if (next.length !== file.sites.length) {
+        removed += file.sites.length - next.length;
+        file.sites = next;
+        if (isPlainObject(file._meta)) file._meta.updated = nowIso();
+        await putConfig(env, outKey, file);
+      }
+    }
+    return ok({ blocklist, overrides, removed });
   }
 
   // —— 配置 ——

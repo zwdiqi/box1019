@@ -707,8 +707,11 @@ function renderOutput(){
     }).join(''));
   }
   if(bl.length){
-    html+=card('<h2>已删除（blocklist）</h2>'+bl.map(function(id){
-      return '<span class="chip mono">'+esc(id)+'<button data-act="unblock" data-id="'+esc(id)+'">恢复</button></span>';
+    html+=card('<h2>已删除（blocklist）</h2><p class="muted small">「恢复」将源放回输出列表；「彻底删除」立即从当前 tv.json / av.json 中移除该源，并永久拦截自动整理重新加入。</p>'+bl.map(function(id){
+      return '<span class="chip mono">'+esc(id)+
+        '<button data-act="unblock" data-id="'+esc(id)+'">恢复</button>'+
+        '<button class="danger" data-act="purge" data-id="'+esc(id)+'">彻底删除</button>'+
+        '</span>';
     }).join(''));
   }
   $('#view').innerHTML=html;
@@ -1230,9 +1233,19 @@ function handle(act,btn){
     return req('POST','/api/admin/blocklist',{blocklist:bl}).then(function(d){ S.state.blocklist=d.blocklist; toast('已从输出中删除'); return loadFiles().then(render); });
   }
   if(act==='unblock'){
-    var id2=btn.getAttribute('data-id');
+    var id2=e.target.getAttribute('data-id');
     var bl2=(S.state.blocklist||[]).filter(function(x){ return x!==id2; });
     return req('POST','/api/admin/blocklist',{blocklist:bl2}).then(function(d){ S.state.blocklist=d.blocklist; toast('已恢复'); return loadFiles().then(render); });
+  }
+  if(act==='purge'){
+    var idp=e.target.getAttribute('data-id');
+    if(!confirm('彻底删除：立即从当前 tv.json / av.json 中移除该源，且自动整理不再重新加入。确定？')) return Promise.resolve();
+    return req('POST','/api/admin/purge',{id:idp}).then(function(d){
+      S.state.blocklist=d.blocklist||S.state.blocklist;
+      if(d.overrides) S.state.overrides=d.overrides;
+      toast('已彻底删除'+(d.removed?('，移除 '+d.removed+' 条'):''));
+      return loadFiles().then(render);
+    });
   }
   if(act==='clear-ov'){
     var id3=btn.getAttribute('data-id');
