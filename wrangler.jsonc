@@ -1,7 +1,7 @@
 {
   // Cloudflare Wrangler 配置（JSON 格式，支持 assets / 自动资源供给等新特性）
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "tvbox-organizer",
+  "name": "box1019",
   "main": "src/index.js",
   "compatibility_date": "2026-10-19",
   "observability": {
