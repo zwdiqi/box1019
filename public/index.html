@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TVBox 源自动整理 · 订阅</title>
+<meta name="description" content="自动整理、分类、测速的 TVBox 订阅源，提供 tv.json 与 av.json 两个可直接使用的订阅链接。">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1>TVBox 源自动整理</h1>
+      <p class="muted small">每周自动下载 · 合并去重 · 分类隔离 · 测速排序</p>
+    </div>
+    <span class="spacer"></span>
+    <span class="badge" id="updated">加载中…</span>
+    <a class="btn ghost" href="/admin">后台管理</a>
+  </header>
+
+  <section class="card">
+    <h2>订阅链接</h2>
+    <p class="muted small">把下面的地址填入 TVBox 的「配置地址」即可使用。建议绑定自有域名后再复制（workers.dev 在国内通常不可用）。</p>
+    <div class="link-box">
+      <span class="tag tv">普通源</span>
+      <code id="linkTv">—</code>
+      <button class="btn ghost" data-copy="#linkTv">复制</button>
+      <a class="btn ghost" id="dlTv" href="/tv.json" download="tv.json">下载</a>
+    </div>
+    <div class="link-box">
+      <span class="tag av">成人源</span>
+      <code id="linkAv">—</code>
+      <button class="btn ghost" data-copy="#linkAv">复制</button>
+      <a class="btn ghost" id="dlAv" href="/av.json" download="av.json">下载</a>
+    </div>
+    <div id="customLinks"></div>
+  </section>
+
+  <section class="card">
+    <h2>概览</h2>
+    <div class="grid" id="stats"></div>
+  </section>
+
+  <section class="card">
+    <h2>源预览</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div class="seg" id="seg">
+        <button class="seg-btn active" data-cat="tv">普通源</button>
+        <button class="seg-btn" data-cat="av">成人源</button>
+      </div>
+      <input id="q" placeholder="搜索源名称 / 接口地址…" style="flex:1;min-width:180px">
+      <span class="muted small" id="count"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th style="width:44px">#</th><th>名称</th><th>接口 / 爬虫</th><th style="width:90px">类型</th><th style="width:100px">延迟</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="muted" style="padding:18px">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="muted small">
+    本系统只聚合公开源的 <b>元数据（名称 / 接口地址）</b>，不代理、不托管任何内容。成人源与普通源分开存储于 av.json / tv.json。
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

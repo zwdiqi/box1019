@@ -1,0 +1,26 @@
+{
+  // Cloudflare Wrangler 配置（JSON 格式，支持 assets / 自动资源供给等新特性）
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tvbox-organizer",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-19",
+  "observability": {
+    "enabled": true
+  },
+
+  // 前端静态资源。未命中静态文件的路径（/api/*、/tv.json、/admin）会自动落到 Worker 处理
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  // 故意不写 id：Deploy to Cloudflare 按钮会自动创建 KV 命名空间并绑定（需 wrangler >= 4.45.0）
+  "kv_namespaces": [
+    { "binding": "TVBOX_KV" }
+  ],
+
+  // 周一 03:00 UTC 触发周更整理；每 15 分钟心跳用于免费版分段续跑与补偿
+  "triggers": {
+    "crons": ["0 3 * * 1", "*/15 * * * *"]
+  }
+}

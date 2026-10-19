@@ -1,0 +1,24 @@
+{
+  "name": "tvbox-organizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TVBox 源自动整理系统（Cloudflare Workers + KV + Cron）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "后台管理密码。部署后可在 /admin 中修改；请务必改成自己的强密码。"
+      },
+      "SESSION_SECRET": {
+        "description": "会话签名密钥。请填入一串随机字符（建议 32 位以上），不要留空。"
+      }
+    }
+  }
+}
