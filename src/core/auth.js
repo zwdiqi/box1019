@@ -32,12 +32,34 @@ async function hmacHex(secret, data) {
   return bytesToHex(new Uint8Array(sig));
 }
 
-/** 首次运行时用 env 里的 ADMIN_PASSWORD 初始化密码记录；缺省则回退到 admin123 并标记告警 */
+/**
+ * 密码记录持久化：以 KV 中的哈希为准，环境变量仅作初始化或覆盖默认密码用。
+ *
+ * 策略：
+ *   1. KV 已有哈希 → 直接用（跨部署持久化，环境变量丢失不影响登录）
+ *   2. KV 是默认密码且环境变量 ADMIN_PASSWORD 有值 → 用环境变量更新 KV（允许通过环境变量重置默认密码）
+ *   3. KV 为空 → 用环境变量或默认 admin123 初始化
+ *
+ * 这样即使部署时 ADMIN_PASSWORD 密钥被删除，只要 KV 没被清空，密码就保持不变，无需重新配置。
+ */
 export async function ensureAuth(env) {
   const existing = await getJSON(env, KEY.AUTH, null);
-  if (existing && existing.salt && existing.hash) return existing;
-
   const fromEnv = env.ADMIN_PASSWORD && String(env.ADMIN_PASSWORD).trim();
+
+  // KV 已有哈希记录
+  if (existing && existing.salt && existing.hash) {
+    // 当前是默认密码，且环境变量指定了新密码 → 更新（便于通过环境变量重置默认密码）
+    if (existing.usingDefault && fromEnv) {
+      const salt = randomHex(16);
+      const hash = await derive(fromEnv, salt, PBKDF2_ITERATIONS);
+      const rec = { salt, hash, iterations: PBKDF2_ITERATIONS, usingDefault: false, updatedAt: nowIso() };
+      await putJSON(env, KEY.AUTH, rec);
+      return rec;
+    }
+    return existing;
+  }
+
+  // KV 为空：用环境变量或默认密码初始化
   const usingDefault = !fromEnv;
   const password = fromEnv || DEFAULT_PASSWORD;
   const salt = randomHex(16);
@@ -66,22 +88,25 @@ export async function isUsingDefaultPassword(env) {
   return !rec || rec.usingDefault === true;
 }
 
+/**
+ * 会话签名密钥：以 KV 持久化为准，环境变量仅作首次初始化用。
+ * 这样即使部署时环境变量/密钥丢失，已生成的密钥仍保留在 KV 中，
+ * 不会导致所有用户会话失效、也无需重新配置。
+ */
 export async function sessionSecret(env) {
   if (cachedSecret) return cachedSecret;
-  const fromEnv = env.SESSION_SECRET && String(env.SESSION_SECRET).trim();
-  if (fromEnv) {
-    cachedSecret = fromEnv;
-    return cachedSecret;
-  }
+  // KV 已有值 → 直接用（跨部署持久化，环境变量丢失不影响）
   const stored = await rawGet(env, KEY.SESSION_SECRET);
   if (stored) {
     cachedSecret = stored;
     return stored;
   }
-  const generated = randomHex(32);
-  await rawPut(env, KEY.SESSION_SECRET, generated);
-  cachedSecret = generated;
-  return generated;
+  // KV 为空：优先用环境变量，否则随机生成，然后写入 KV 持久化
+  const fromEnv = env.SESSION_SECRET && String(env.SESSION_SECRET).trim();
+  const secret = fromEnv || randomHex(32);
+  await rawPut(env, KEY.SESSION_SECRET, secret);
+  cachedSecret = secret;
+  return secret;
 }
 
 export async function createSessionToken(env) {
