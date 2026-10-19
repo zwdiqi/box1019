@@ -16,7 +16,7 @@
 1. 在 GitHub 新建一个 **public** 仓库，把本项目全部文件上传上去。
 2. 把下面链接里的 `你的用户名/TVBox-Organizer` 换成你的实际仓库地址，然后点击按钮：
 
-   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/你的用户名/TVBox-Organizer)
+   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zwdiqi/box1019)
 
 3. 授权 Cloudflare 后，在配置页：
    - 可修改 Worker 名称；
