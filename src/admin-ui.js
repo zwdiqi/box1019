@@ -91,14 +91,12 @@ export function loginPage() {
 <body>
 <div class="login-wrap">
   <div class="card login-card">
-    <h2>TVBox 源整理后台</h2>
     <p class="muted small" id="hint">请输入管理密码</p>
     <form id="f" autocomplete="off">
       <input type="password" id="pwd" placeholder="管理密码" autocomplete="current-password" autofocus>
       <div style="height:12px"></div>
       <button type="submit" style="width:100%">登录</button>
     </form>
-    <p class="muted small" style="margin-top:14px">首次部署若未设置 ADMIN_PASSWORD，默认密码为 <b>admin123</b>，请登录后立即修改。</p>
   </div>
 </div>
 <div class="toast" id="toast"></div>
