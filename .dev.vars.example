@@ -1,0 +1,6 @@
+# 部署时 Cloudflare 会读取本文件，在部署配置页让你填写真实值。
+# 真实值会作为加密的 Worker Secrets 注入，不会写进仓库。
+# 复制此文件为 .dev.vars 即可在本地 wrangler dev 时使用（.dev.vars 已被 .gitignore 忽略）。
+
+ADMIN_PASSWORD=
+SESSION_SECRET=

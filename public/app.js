@@ -1,6 +1,6 @@
 /**
- * 公开页逻辑：拉取状态与两个订阅文件，渲染订阅链接、概览与源预览。
- * 纯只读，不需要登录。
+ * 公开页逻辑：拉取状态与两个订阅文件，渲染概览与源预览。
+ * 纯只读，不需要登录。订阅链接统一放在后台管理页。
  */
 (function () {
   'use strict';
@@ -61,31 +61,10 @@
     return sites;
   }
 
-  function renderLinks() {
-    var origin = location.origin;
-    var tv = origin + '/tv.json';
-    var av = origin + '/av.json';
-    $('#linkTv').textContent = tv;
-    $('#linkAv').textContent = av;
-    $('#dlTv').setAttribute('href', tv);
-    $('#dlAv').setAttribute('href', av);
-
-    var subs = (S.status && S.status.subs) || [];
-    var box = $('#customLinks');
-    if (!subs.length || (S.status && S.status.customFilesEnabled === false)) { box.innerHTML = ''; return; }
-    box.innerHTML = subs.map(function (s) {
-      var url = origin + '/' + s.name + '.json';
-      return '<div class="link-box"><span class="tag">' + esc(s.title || s.name) + '</span>' +
-        '<code>' + esc(url) + '</code>' +
-        '<button class="btn ghost" data-text="' + esc(url) + '">复制</button>' +
-        '<a class="btn ghost" href="' + esc(url) + '" download>下载</a></div>';
-    }).join('');
-  }
-
   function renderStats() {
     var c = (S.status && S.status.counts) || {};
     var items = [
-      ['普通源', c.tv], ['成人源', c.av], ['有效源', c.alive],
+      ['普通源', c.tv], ['成人源', c.av], ['直播源', c.live], ['有效源', c.alive],
       ['失效源', c.dead], ['抓取站点', c.sites], ['源地址', c.sources]
     ];
     $('#stats').innerHTML = items.map(function (it) {
@@ -114,7 +93,7 @@
     }).join('');
   }
 
-  function render() { renderLinks(); renderStats(); renderTable(); }
+  function render() { renderStats(); renderTable(); }
 
   function json(url) {
     return fetch(url, { credentials: 'same-origin' }).then(function (r) {

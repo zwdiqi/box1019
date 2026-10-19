@@ -3,6 +3,7 @@
  *
  * Worker 里无法做 TCP / 爬虫类探测，只能对 http(s) 形式的接口地址发请求测 TTFB。
  * 判定标准：只要拿到响应头就算「连通」（403/404 也算通），请求异常/超时才判为失效。
+ * 直播源（m3u/txt 列表）另需读取正文判定有效性，因此额外提供限长读取的探测函数。
  */
 
 export function isTestable(site) {
@@ -44,6 +45,63 @@ export async function probe(url, timeoutMs = 8000) {
     return { ok: true, ms, status: res.status };
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, status: 0, error: (e && e.message) || String(e) };
+  }
+}
+
+/** 读取响应正文，最多 maxBytes 字节（避免大文件把一次调用撑爆） */
+async function readLimited(res, maxBytes) {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let out = '';
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.length;
+      out += decoder.decode(value, { stream: true });
+      if (received >= maxBytes) break;
+    }
+    out += decoder.decode();
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* 忽略取消流的异常 */
+    }
+  }
+  return out;
+}
+
+/**
+ * 探测直播源地址：下载正文（限长）并返回 TTFB。
+ * @returns {Promise<{ok:boolean, ms:number, status:number, text:string, error?:string}>}
+ */
+export async function fetchLimited(url, timeoutMs = 10000, maxBytes = 65536) {
+  const t0 = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: { 'User-Agent': 'okhttp/4.9.0', Accept: '*/*' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const ms = Date.now() - t0;
+    if (!res.ok) {
+      if (res.body) {
+        try {
+          await res.body.cancel();
+        } catch {
+          /* 忽略取消流的异常 */
+        }
+      }
+      return { ok: false, ms, status: res.status, text: '', error: `HTTP ${res.status}` };
+    }
+    const text = await readLimited(res, maxBytes);
+    return { ok: true, ms, status: res.status, text };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - t0, status: 0, text: '', error: (e && e.message) || String(e) };
   }
 }
 

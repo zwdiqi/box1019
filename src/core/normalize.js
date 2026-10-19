@@ -38,9 +38,52 @@ export function absolutizeSpider(spider, baseUrl) {
   return [absolutizeOne(path, baseUrl), ...rest].join(';');
 }
 
+/** 像一个 TVBox 站点：带非空的 api 字符串 */
+function looksLikeSite(x) {
+  return isPlainObject(x) && typeof x.api === 'string' && x.api.trim() !== '';
+}
+
+/** 像一个订阅链接：带非空的 url 字符串 */
+function looksLikeRepo(x, onlyJson) {
+  if (!isPlainObject(x) || typeof x.url !== 'string' || !x.url.trim()) return false;
+  if (looksLikeSite(x)) return false;
+  if (!onlyJson) return true;
+  return /\.(json|txt)$/i.test(x.url.trim());
+}
+
+/**
+ * 把「接口清单」条目补成 TVBox 可用的站点。
+ * 这类文件（如 CMS 资源站清单）只有 name + api，没有 type，
+ * 补 type 后 TVBox 才能正确识别；apiType 为 xml 时按 0（xml）处理，其余按 1（json）。
+ */
+function toSite(raw) {
+  const site = {};
+  for (const k of Object.keys(raw)) {
+    if (UNSAFE.has(k)) continue;
+    site[k] = raw[k];
+  }
+  if (site.type === undefined) {
+    site.type = typeof raw.apiType === 'string' && /xml/i.test(raw.apiType) ? 0 : 1;
+  }
+  if (site.key === undefined && typeof raw.name === 'string' && raw.name) site.key = raw.name;
+  return site;
+}
+
+function toRepos(list, baseUrl) {
+  return list.map((r) => ({ name: String(r.name || ''), url: absolutizeOne(r.url, baseUrl) }));
+}
+
+/** 可能包住站点/链接列表的常见容器字段 */
+const LIST_KEYS = ['data', 'list', 'items', 'result', 'results', 'rows', 'content', 'sites', 'urls'];
+
 /**
  * 解析一份源文件内容。
- * 返回 { kind: 'config', sites, envelope } | { kind: 'repo', repos } | { kind: 'invalid', reason }
+ *
+ * 不挑格式：标准 TVBox 单配置（sites）、多仓（urls）、
+ * 以及各种「接口清单」JSON（顶层数组或 { data/list/items } 里装着 { name, api }）
+ * 都会尽量把内容读出来。
+ *
+ * @returns {{kind:'config', sites:any[], envelope:object|null}|{kind:'repo', repos:any[]}|{kind:'invalid', reason:string}}
  */
 export function parseConfig(text, baseUrl) {
   let obj;
@@ -51,23 +94,36 @@ export function parseConfig(text, baseUrl) {
   }
 
   if (Array.isArray(obj)) {
-    const repos = obj.filter(isPlainObject).filter((x) => typeof x.url === 'string' && x.url);
-    if (repos.length) {
-      return { kind: 'repo', repos: repos.map((r) => ({ name: String(r.name || ''), url: absolutizeOne(r.url, baseUrl) })) };
-    }
-    return { kind: 'invalid', reason: '顶层是数组但没有 url 字段（不是多仓格式）' };
+    const sites = obj.filter(looksLikeSite);
+    if (sites.length) return { kind: 'config', sites: sites.map(toSite), envelope: null };
+    const repos = obj.filter((x) => looksLikeRepo(x, false));
+    if (repos.length) return { kind: 'repo', repos: toRepos(repos, baseUrl) };
+    return { kind: 'invalid', reason: '数组里既没有 api 接口，也没有 url 订阅链接' };
   }
 
   if (!isPlainObject(obj)) return { kind: 'invalid', reason: '顶层不是对象或数组' };
 
+  // ① 标准 TVBox 单配置
   if (Array.isArray(obj.sites)) return { kind: 'config', sites: obj.sites, envelope: obj };
 
+  // ② 标准多仓
   const repoList = asArray(obj.urls).filter(isPlainObject).filter((x) => typeof x.url === 'string' && x.url);
-  if (repoList.length) {
-    return { kind: 'repo', repos: repoList.map((r) => ({ name: String(r.name || ''), url: absolutizeOne(r.url, baseUrl) })) };
+  if (repoList.length) return { kind: 'repo', repos: toRepos(repoList, baseUrl) };
+
+  // ③ 这份文件自己就是一条接口
+  if (looksLikeSite(obj)) return { kind: 'config', sites: [toSite(obj)], envelope: null };
+
+  // ④ 兜底：常见的容器字段里再找一层
+  for (const k of LIST_KEYS) {
+    const list = obj[k];
+    if (!Array.isArray(list) || !list.length) continue;
+    const sites = list.filter(looksLikeSite);
+    if (sites.length) return { kind: 'config', sites: sites.map(toSite), envelope: null };
+    const repos = list.filter((x) => looksLikeRepo(x, false));
+    if (repos.length) return { kind: 'repo', repos: toRepos(repos, baseUrl) };
   }
 
-  return { kind: 'invalid', reason: '既没有 sites 数组，也不是多仓格式' };
+  return { kind: 'invalid', reason: '没有找到任何可用的接口或订阅链接' };
 }
 
 /** 站点唯一标识：优先用 key，并混入 api 哈希以区分不同配置里的同名 key */
@@ -91,7 +147,7 @@ export function buildSite(raw, baseUrl) {
   return site;
 }
 
-const ENVELOPE_KEYS = ['spider', 'wallpaper', 'logo', 'parses', 'flags', 'ads', 'rules', 'ijk', 'doh'];
+const ENVELOPE_KEYS = ['spider', 'wallpaper', 'logo', 'parses', 'flags', 'ads', 'rules', 'ijk', 'doh', 'lives'];
 
 /** 提取 TVBox 信封（spider / lives / parses …），并解析其中的相对路径；不含 sites */
 export function buildEnvelope(envelope, baseUrl) {

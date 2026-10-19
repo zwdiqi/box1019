@@ -27,14 +27,25 @@ export const DEFAULT_CONFIG = {
   chunkSize: 25,
   maxSites: 800,
   maxRepos: 60,
-  // 一次 tick 允许消耗的外部子请求数。付费版 10000/次，免费版仅 50/次
-  tickSubrequestBudget: 9000,
-  // 心跳 cron（每 15 分钟）的单次预算，免费版会被 tickSubrequestBudget 进一步压低
-  heartbeatSubrequestBudget: 200,
+  // 一次 tick 允许消耗的「外部请求」子请求数。
+  // Cloudflare：免费版每次调用仅 50 个外部子请求，付费版默认 10000。
+  // 这里按免费版预置，保证一键部署即可正常跑完；付费版可在后台调高到 9000+ 一次跑完。
+  // 注意：KV 读写走的是另一套额度（免费版 1000/次），不占用这里的预算。
+  tickSubrequestBudget: 45,
+  // 心跳 cron（每 15 分钟）的单次预算，同样按免费版上限预置
+  heartbeatSubrequestBudget: 40,
   // 一次 tick 的墙钟时间预算（毫秒）。周更 cron 的墙钟上限为 15 分钟
   tickTimeBudgetMs: 780000,
   heartbeatEnabled: true,
   customFilesEnabled: true,
+  // 直播源自动更新：检测有效后按测速结果并入 tv.json 的 lives 数组
+  liveEnabled: true,
+  liveTimeoutMs: 12000,
+  // 正文长度下限（字节）：过短视为无效（多为错误页或空列表）
+  liveMinBytes: 200,
+  // 自动更新时间（北京时间）。默认周一 11:00（北京）= 周一 03:00 UTC，
+  // 与 wrangler.jsonc 里的周更 cron 一致；分钟后端只接受 0/15/30/45。
+  autoUpdate: { enabled: true, weekday: 1, hour: 11, minute: 0 },
 };
 
 let bootstrapped = false;
@@ -49,6 +60,7 @@ export async function ensureBootstrap(env) {
     [KEY.OVERRIDES, {}],
     [KEY.BLOCKLIST, []],
     [KEY.SUBS, []],
+    [KEY.LIVES, []],
   ];
   await Promise.all(seeds.map(async ([key, value]) => {
     const current = await getJSON(env, key, null);

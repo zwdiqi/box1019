@@ -140,7 +140,7 @@ export function adminPage() {
 (function(){
 'use strict';
 
-var TABS=[['dash','数据看板'],['sources','源地址清单'],['manual','手动源'],['output','自动源编辑'],['subs','自定义订阅'],['config','配置'],['security','密码']];
+var TABS=[['dash','数据看板'],['sources','源地址清单'],['manual','手动源'],['lives','直播源'],['output','自动源编辑'],['subs','自定义订阅'],['config','配置'],['security','密码']];
 var S={state:null,tv:null,av:null,tab:'dash',pollTimer:null};
 
 var $=function(s,r){return (r||document).querySelector(s);};
@@ -201,8 +201,10 @@ function loadState(){
   return req('GET','/api/admin/state').then(function(d){ S.state=d; return d; });
 }
 function loadFiles(){
+  // no-store：订阅文件带 Cache-Control: max-age=600，若用浏览器缓存，
+  // 整理完成或改动后会被旧缓存挡住，导致「自动源编辑 / 直播源」显示过期数据。
   function file(path){
-    return fetch(path,{credentials:'same-origin'}).then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; });
+    return fetch(path,{credentials:'same-origin',cache:'no-store'}).then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; });
   }
   return Promise.all([file('/tv.json'),file('/av.json')]).then(function(r){ S.tv=r[0]; S.av=r[1]; });
 }
@@ -216,6 +218,7 @@ function render(){
   if(S.tab==='dash') renderDash();
   else if(S.tab==='sources') renderSources();
   else if(S.tab==='manual') renderManual();
+  else if(S.tab==='lives') renderLives();
   else if(S.tab==='output') renderOutput();
   else if(S.tab==='subs') renderSubs();
   else if(S.tab==='config') renderConfig();
@@ -225,7 +228,7 @@ function render(){
 function card(inner){ return '<div class="card">'+inner+'</div>'; }
 function statsHtml(c){
   c=c||{};
-  var items=[['源地址',c.sources],['抓取站点',c.sites],['测速',c.tested],['有效',c.alive],['失效',c.dead],['普通源',c.tv],['成人源',c.av]];
+  var items=[['源地址',c.sources],['抓取站点',c.sites],['测速',c.tested],['有效',c.alive],['失效',c.dead],['普通源',c.tv],['成人源',c.av],['直播源',c.live]];
   return '<div class="grid">'+items.map(function(it){ return '<div class="stat"><div class="k">'+it[0]+'</div><div class="v">'+(it[1]==null?'0':it[1])+'</div></div>'; }).join('')+'</div>';
 }
 
@@ -247,6 +250,7 @@ function renderDash(){
     '</div>'+
     '<p class="muted small">免费版单次 CPU 有限，一次点击跑不完是正常的；可隔一会儿点「继续执行」，或依赖每 15 分钟的心跳自动续跑。</p>'
   );
+  html+=subsLinksCard(st);
   html+=card('<h2>上次整理结果</h2>'+(lr? ('<div class="row" style="margin-bottom:10px"><span class="muted small">时间 '+fmtTime(lr.time)+' · 耗时 '+(lr.durationMs==null?'—':Math.round(lr.durationMs/1000)+'s')+' · 原因 '+esc(lr.reason||'')+' · 错误 '+(lr.errorCount||0)+'</span></div>'+statsHtml(lr.counts)) : '<p class="muted">尚无记录，请先执行一次整理。</p>'));
   if(lr&&lr.errors&&lr.errors.length){
     html+=card('<h2>最近错误（最多 50 条）</h2><div class="err-list">'+lr.errors.map(function(e){ return '<div class="log"><b>'+esc(e.message)+'</b><br><span class="muted">'+esc(e.url)+'</span></div>'; }).join('')+'</div>');
@@ -255,36 +259,74 @@ function renderDash(){
   schedulePoll();
 }
 
+// 订阅链接：后台里直接给出可用的 TVBox 订阅地址
+function subsLinksCard(st){
+  var origin=location.origin;
+  var html='<h2>订阅链接</h2>'+
+    '<p class="muted small">把下面的地址填入 TVBox 的「配置地址」即可使用。若域名是 workers.dev / pages.dev，国内通常无法访问，请先绑定自有域名。</p>'+
+    linkBox('普通源',origin+'/tv.json')+
+    linkBox('成人源',origin+'/av.json');
+  var subs=(st&&st.subs)||[];
+  var enabled=!(st&&st.config&&st.config.customFilesEnabled===false);
+  if(subs.length&&enabled){
+    subs.forEach(function(s){ html+=linkBox(s.title||s.name, origin+'/'+s.name+'.json'); });
+  }
+  return card(html);
+}
+function linkBox(label,url){
+  return '<div class="link-box">'+
+    '<span class="muted small" style="min-width:56px">'+esc(label)+'</span>'+
+    '<code>'+esc(url)+'</code>'+
+    '<button class="ghost" data-act="copy" data-text="'+esc(url)+'">复制</button>'+
+    '<a href="'+esc(url)+'" download>下载</a>'+
+  '</div>';
+}
+
 function schedulePoll(){
   clearTimeout(S.pollTimer);
   var p=S.state&&S.state.pipeline;
-  if(p&&p.running){
-    S.pollTimer=setTimeout(function(){
-      loadState().then(function(){ if(S.tab==='dash') render(); else render(); }).catch(function(){});
-    },4000);
-  }
+  if(!(p&&p.running)) return;
+  S.pollTimer=setTimeout(function(){
+    // 只在看板轮询：切到别的标签页时停止，否则重建 DOM 会冲掉正在编辑的内容
+    if(S.tab!=='dash') return;
+    loadState().then(render).catch(function(){});
+  },4000);
 }
 
 // 源地址清单
+var CATEGORY_SELECT='<td class="tight"><select name="category"><option value="auto">自动判断</option><option value="av">成人源</option><option value="tv">普通源</option></select></td>';
 function renderSources(){
   var list=(S.state&&S.state.sources)||[];
   var rows=list.map(function(s,i){
+    var cat=s.category==='av'||s.category==='tv'?s.category:'auto';
     return '<tr>'+
       '<td><input name="name" value="'+esc(s.name)+'" placeholder="备注名"></td>'+
       '<td><input name="url" value="'+esc(s.url)+'" placeholder="https://.../config.json"></td>'+
+      '<td class="tight"><select name="category">'+
+        '<option value="auto"'+(cat==='auto'?' selected':'')+'>自动判断</option>'+
+        '<option value="av"'+(cat==='av'?' selected':'')+'>成人源</option>'+
+        '<option value="tv"'+(cat==='tv'?' selected':'')+'>普通源</option>'+
+      '</select></td>'+
       '<td class="tight"><input type="checkbox" name="enabled"'+(s.enabled!==false?' checked':'')+'></td>'+
       '<td class="tight"><button class="ghost" data-act="del-src" data-i="'+i+'">删除</button></td>'+
     '</tr>';
   }).join('');
   var html=card(
     '<h2>源地址清单</h2>'+
-    '<p class="muted small">这些是「待下载整理」的源配置地址（普通源 / 成人源都会从这里抓取，再自动分类）。支持 TVBox 单配置（含 sites）与多仓格式（含 urls）。</p>'+
-    '<table><thead><tr><th>备注</th><th>地址</th><th>启用</th><th></th></tr></thead><tbody id="srcRows">'+rows+'</tbody></table>'+
+    '<p class="muted small">这些是「待下载整理」的源配置地址。<b>只要是 JSON 都会尽量读出内容</b>：标准 TVBox 单配置（含 sites）、多仓格式（含 urls）、以及各种「接口清单」（顶层数组或 data/list/items 里装着 name + api 的条目，会自动补上 type 变成可用站点）。</p>'+
+    '<p class="muted small"><b>分类</b>：选「自动判断」时按关键字识别成人源；如果这个源里全是成人内容、关键字识别不准，直接选「成人源」，它下面的所有站点会强制写进 av.json（选「普通源」同理）。</p>'+
+    '<table><thead><tr><th>备注</th><th>地址</th><th>分类</th><th>启用</th><th></th></tr></thead><tbody id="srcRows">'+rows+'</tbody></table>'+
     '<div class="toolbar" style="margin-top:12px">'+
       '<button class="ghost" data-act="add-src">新增一行</button>'+
       '<button data-act="save-src">保存清单</button>'+
       '<button class="ghost" data-act="import-src">导入 JSON</button>'+
       '<button class="ghost" data-act="export-src">导出 JSON</button>'+
+    '</div>'+
+    '<h2 style="margin-top:22px">批量导入链接</h2>'+
+    '<p class="muted small">每行一个地址。可只写地址，也可写成「备注名,地址」。支持一次粘贴几十条，追加到上面表格后再点「保存清单」。</p>'+
+    '<textarea id="bulkSrc" rows="5" placeholder="我的成人源,https://xxx.com/config.json&#10;https://yyy.com/tv.json"></textarea>'+
+    '<div class="toolbar" style="margin-top:8px">'+
+      '<button class="ghost" data-act="bulk-src">追加到清单</button>'+
     '</div>'
   );
   $('#view').innerHTML=html;
@@ -296,7 +338,9 @@ function collectSources(){
     var name=tr.querySelector('[name=name]').value.trim();
     var url=tr.querySelector('[name=url]').value.trim();
     var enabled=tr.querySelector('[name=enabled]').checked;
-    if(url) out.push({name:name,url:url,enabled:enabled});
+    var catEl=tr.querySelector('[name=category]');
+    var category=catEl?catEl.value:'auto';
+    if(url) out.push({name:name,url:url,enabled:enabled,category:category});
   });
   return out;
 }
@@ -357,6 +401,80 @@ function collectManualGroup(g){
     var item={name:name,api:api};
     if(typeRaw!=='' && !isNaN(Number(typeRaw))) item.type=Number(typeRaw);
     if(ext) item.ext=ext;
+    out.push(item);
+  });
+  return out;
+}
+
+// 直播源（自动检测有效后按速度并入 tv.json）
+function renderLives(){
+  var list=(S.state&&S.state.lives)||[];
+  var liveEnabled=(S.state&&S.state.config&&S.state.config.liveEnabled)!==false;
+  var rows=list.map(function(l,i){
+    return '<tr data-i="'+i+'">'+
+      '<td><input name="name" value="'+esc(l.name)+'" placeholder="直播源名"></td>'+
+      '<td><input name="url" class="mono" value="'+esc(l.url)+'" placeholder="https://.../live.m3u"></td>'+
+      '<td class="tight" style="width:80px"><input name="type" value="'+esc(l.type==null?'':l.type)+'" placeholder="type"></td>'+
+      '<td><input name="epg" value="'+esc(l.epg)+'" placeholder="EPG（可空）"></td>'+
+      '<td class="tight"><input type="checkbox" name="enabled"'+(l.enabled!==false?' checked':'')+'></td>'+
+      '<td class="tight"><button class="ghost" data-act="del-live" data-i="'+i+'">删除</button></td>'+
+    '</tr>';
+  }).join('');
+  var html=card(
+    '<h2>直播源清单</h2>'+
+    '<p class="muted small">这些直播源会在整理时被自动下载检测：<b>只有检测正常的才会写入 tv.json 的 lives 数组，并按检测速度（毫秒）升序排列</b>。'+
+      (liveEnabled?'':'<b>（当前配置已关闭直播源自动更新）</b>')+'</p>'+
+    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>EPG</th><th>启用</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
+    '<div class="toolbar" style="margin-top:12px">'+
+      '<button class="ghost" data-act="add-live">新增一行</button>'+
+      '<button data-act="save-lives">保存清单</button>'+
+      '<button class="ghost" data-act="import-live">导入 JSON</button>'+
+      '<button class="ghost" data-act="export-live">导出 JSON</button>'+
+    '</div>'+
+    '<h2 style="margin-top:22px">批量导入直播源</h2>'+
+    '<p class="muted small">每行一个地址。可只写地址，也可写成「备注名,地址」。追加到上面表格后再点「保存清单」。</p>'+
+    '<textarea id="bulkLive" rows="4" placeholder="央视直播,https://xxx.com/live.m3u&#10;https://yyy.com/tv.txt"></textarea>'+
+    '<div class="toolbar" style="margin-top:8px">'+
+      '<button class="ghost" data-act="bulk-live">追加到清单</button>'+
+    '</div>'
+  );
+  html+=liveResultCard();
+  $('#view').innerHTML=html;
+}
+
+function liveResultCard(){
+  var tv=S.tv;
+  var lives=(tv&&Array.isArray(tv.lives))?tv.lives:[];
+  if(!lives.length){
+    return card('<h2>当前 tv.json 中的直播源</h2><p class="muted">暂无。执行一次整理并完成检测后，这里会列出已并入的直播源。</p>');
+  }
+  var rows=lives.map(function(l){
+    return '<tr>'+
+      '<td>'+esc(l.name)+'</td>'+
+      '<td class="mono">'+esc(l.url)+'</td>'+
+      '<td class="tight">'+esc(l.type==null?'':l.type)+'</td>'+
+      '<td class="tight muted small">'+(typeof l._latency==='number'?l._latency+'ms':'未测速')+'</td>'+
+    '</tr>';
+  }).join('');
+  return card(
+    '<h2>当前 tv.json 中的直播源（共 '+lives.length+' 条）</h2>'+
+    '<p class="muted small">已按检测速度升序排列，与订阅链接里的 lives 数组一致。</p>'+
+    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>速度</th></tr></thead><tbody>'+rows+'</tbody></table>'
+  );
+}
+
+function collectLives(){
+  var out=[];
+  $$('#liveRows tr').forEach(function(tr){
+    var name=tr.querySelector('[name=name]').value.trim();
+    var url=tr.querySelector('[name=url]').value.trim();
+    var typeRaw=tr.querySelector('[name=type]').value.trim();
+    var epg=tr.querySelector('[name=epg]').value.trim();
+    var enabled=tr.querySelector('[name=enabled]').checked;
+    if(!url) return;
+    var item={name:name,url:url,enabled:enabled};
+    if(typeRaw!=='' && !isNaN(Number(typeRaw))) item.type=Number(typeRaw);
+    if(epg) item.epg=epg;
     out.push(item);
   });
   return out;
@@ -474,10 +592,44 @@ function collectSubs(){
 }
 
 // 配置
+var DAY_LABELS={1:'周一',2:'周二',3:'周三',4:'周四',5:'周五',6:'周六',7:'周日'};
+function pad2(v){ v=String(v); return v.length<2?'0'+v:v; }
+function hourRange(){ var out=[]; for(var i=0;i<24;i++){ out.push(i); } return out; }
+function optionList(list,selected,labels){
+  return list.map(function(v){
+    return '<option value="'+v+'"'+(Number(selected)===v?' selected':'')+'>'+(labels&&labels[v]!=null?labels[v]:pad2(v))+'</option>';
+  }).join('');
+}
+
 function renderConfig(){
   var c=(S.state&&S.state.config)||{};
   var kw=Array.isArray(c.adultKeywords)?c.adultKeywords.join(','):'';
+  var au=c.autoUpdate||{};
   var html=card(
+    '<h2>自动更新时间</h2>'+
+    '<p class="muted small">每周定时执行一次整理，时间为<b>北京时间</b>。到点检测由每 15 分钟一次的心跳任务完成，所以分钟只能选 0 / 15 / 30 / 45（例：周一 11:00 北京 = 周一 03:00 UTC）。</p>'+
+    '<div class="row" style="margin-bottom:10px">'+
+      '<label class="row small"><input type="checkbox" id="au"'+(au.enabled!==false?' checked':'')+'> 启用自动更新</label>'+
+    '</div>'+
+    '<div class="grid">'+
+      '<div class="stat"><div class="k">星期</div><select id="auDay">'+optionList([1,2,3,4,5,6,7], au.weekday==null?1:au.weekday, DAY_LABELS)+'</select></div>'+
+      '<div class="stat"><div class="k">小时</div><select id="auHour">'+optionList(hourRange(), au.hour==null?11:au.hour)+'</select></div>'+
+      '<div class="stat"><div class="k">分钟</div><select id="auMin">'+optionList([0,15,30,45], au.minute==null?0:au.minute)+'</select></div>'+
+    '</div>'+
+    '<p class="muted small" style="margin-top:10px">改完点最下方的「保存配置」生效，不需要重新部署。</p>'
+  );
+  html+=card(
+    '<h2>直播源自动更新</h2>'+
+    '<p class="muted small">开启后，整理时会把「直播源」页里的地址逐个下载检测：<b>检测正常的才写入 tv.json 的 lives，并按速度升序排列</b>。正文短于长度下限、请求失败或返回 HTML 的视为失效，不会写入。</p>'+
+    '<div class="row" style="margin-bottom:10px">'+
+      '<label class="row small"><input type="checkbox" id="lvEn"'+(c.liveEnabled!==false?' checked':'')+'> 启用直播源自动更新</label>'+
+    '</div>'+
+    '<div class="grid">'+
+      cfgField('liveTimeoutMs','直播源超时(ms)',c.liveTimeoutMs)+
+      cfgField('liveMinBytes','正文长度下限(字节)',c.liveMinBytes)+
+    '</div>'
+  );
+  html+=card(
     '<h2>成人源识别关键字</h2>'+
     '<p class="muted small">逗号或换行分隔；中文按子串匹配，拉丁字母按词边界匹配（避免 av 命中 java）。</p>'+
     '<textarea id="kw">'+esc(kw)+'</textarea>'
@@ -495,6 +647,7 @@ function renderConfig(){
       cfgField('heartbeatSubrequestBudget','心跳子请求预算',c.heartbeatSubrequestBudget)+
       cfgField('tickTimeBudgetMs','单次时间预算(ms)',c.tickTimeBudgetMs)+
     '</div>'+
+    '<p class="muted small">Cloudflare 免费版单次调用仅 50 个外部子请求，故默认按免费版预置（45 / 40），整理全靠心跳分段续跑；升级到付费版（10000/次）后可把「单次子请求预算」调到 9000 左右一次跑完。注意别超过 50，否则单次调用会报错。</p>'+
     '<div class="row" style="margin-top:12px">'+
       '<label class="row small"><input type="checkbox" id="hb"'+(c.heartbeatEnabled!==false?' checked':'')+'> 启用心跳续跑</label>'+
       '<label class="row small"><input type="checkbox" id="cf"'+(c.customFilesEnabled!==false?' checked':'')+'> 启用自定义订阅</label>'+
@@ -521,6 +674,13 @@ function collectConfig(){
   cfg.adultKeywords=$('#kw').value.split(/[,，、\\s]+/).map(function(s){ return s.trim(); }).filter(Boolean);
   cfg.heartbeatEnabled=$('#hb').checked;
   cfg.customFilesEnabled=$('#cf').checked;
+  cfg.liveEnabled=$('#lvEn').checked;
+  cfg.autoUpdate={
+    enabled:$('#au').checked,
+    weekday:Number($('#auDay').value),
+    hour:Number($('#auHour').value),
+    minute:Number($('#auMin').value)
+  };
   return cfg;
 }
 
@@ -562,8 +722,31 @@ function handle(act,btn){
 
   if(act==='add-src'){
     var tr=document.createElement('tr');
-    tr.innerHTML='<td><input name="name" placeholder="备注名"></td><td><input name="url" placeholder="https://.../config.json"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-src">删除</button></td>';
+    tr.innerHTML='<td><input name="name" placeholder="备注名"></td><td><input name="url" placeholder="https://.../config.json"></td>'+CATEGORY_SELECT+'<td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-src">删除</button></td>';
     $('#srcRows').appendChild(tr); return Promise.resolve();
+  }
+  if(act==='bulk-src'){
+    var raw=$('#bulkSrc')?$('#bulkSrc').value:'';
+    var lines=String(raw).split(String.fromCharCode(10));
+    var added=0, skipped=0;
+    lines.forEach(function(line){
+      var text=line.trim();
+      if(!text) return;
+      var name='', url=text;
+      var ci=text.search(/[,，]/);
+      if(ci>0){
+        var head=text.slice(0,ci).trim(), tail=text.slice(ci+1).trim();
+        if(/^https?:/i.test(tail)){ name=head; url=tail; }
+      }
+      if(!/^https?:/i.test(url)){ skipped+=1; return; }
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td>'+CATEGORY_SELECT+'<td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-src">删除</button></td>';
+      $('#srcRows').appendChild(tr);
+      added+=1;
+    });
+    if($('#bulkSrc')) $('#bulkSrc').value='';
+    toast('追加 '+added+' 行'+(skipped?('，忽略 '+skipped+' 行非链接'):'')+'，记得点「保存清单」');
+    return Promise.resolve();
   }
   if(act==='del-src'){ btn.closest('tr').remove(); return Promise.resolve(); }
   if(act==='save-src'){
@@ -574,6 +757,46 @@ function handle(act,btn){
   }
   if(act==='import-src'){
     pickFile(function(data){ req('POST','/api/admin/import',{type:'sources',data:data}).then(function(){ toast('导入成功'); return loadState().then(render); }); });
+    return Promise.resolve();
+  }
+
+  if(act==='add-live'){
+    var ltr=document.createElement('tr');
+    ltr.innerHTML='<td><input name="name" placeholder="直播源名"></td><td><input name="url" placeholder="https://.../live.m3u"></td><td style="width:80px"><input name="type" placeholder="type"></td><td><input name="epg" placeholder="EPG（可空）"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+    $('#liveRows').appendChild(ltr); return Promise.resolve();
+  }
+  if(act==='bulk-live'){
+    var lraw=$('#bulkLive')?$('#bulkLive').value:'';
+    var llines=String(lraw).split(String.fromCharCode(10));
+    var ladded=0, lskipped=0;
+    llines.forEach(function(line){
+      var text=line.trim();
+      if(!text) return;
+      var name='', url=text;
+      var ci=text.search(/[,，]/);
+      if(ci>0){
+        var head=text.slice(0,ci).trim(), tail=text.slice(ci+1).trim();
+        if(/^https?:/i.test(tail)){ name=head; url=tail; }
+      }
+      if(!/^https?:/i.test(url)){ lskipped+=1; return; }
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td><td style="width:80px"><input name="type"></td><td><input name="epg"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+      $('#liveRows').appendChild(tr);
+      ladded+=1;
+    });
+    if($('#bulkLive')) $('#bulkLive').value='';
+    toast('追加 '+ladded+' 行'+(lskipped?('，忽略 '+lskipped+' 行非链接'):'')+'，记得点「保存清单」');
+    return Promise.resolve();
+  }
+  if(act==='del-live'){ btn.closest('tr').remove(); return Promise.resolve(); }
+  if(act==='save-lives'){
+    return req('POST','/api/admin/lives',{lives:collectLives()}).then(function(d){ S.state.lives=d.lives; toast('直播源清单已保存'); render(); });
+  }
+  if(act==='export-live'){
+    return req('GET','/api/admin/export?type=lives').then(function(d){ download('lives.json',JSON.stringify(d.data,null,2)); toast('已导出'); });
+  }
+  if(act==='import-live'){
+    pickFile(function(data){ req('POST','/api/admin/import',{type:'lives',data:data}).then(function(){ toast('导入成功'); return loadState().then(render); }); });
     return Promise.resolve();
   }
 
@@ -674,17 +897,15 @@ function handle(act,btn){
 
 function runPipeline(route){
   return req('POST','/api/admin/pipeline/'+route).then(function(){
-    return loadState();
-  }).then(function(){ return loadFiles(); }).then(function(){
+    return Promise.all([loadState(),loadFiles()]);
+  }).then(function(){
     toast('已触发整理，可稍后「继续执行」或等待心跳续跑');
-    if(S.tab==='dash'||S.tab==='output') render(); else render();
+    render();
   });
 }
 
 // —— 启动 ——
-loadState().then(function(){
-  return loadFiles();
-}).then(function(){
+Promise.all([loadState(),loadFiles()]).then(function(){
   render();
 }).catch(function(err){
   toast('加载失败：'+(err.message||err),true);

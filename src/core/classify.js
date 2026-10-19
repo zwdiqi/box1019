@@ -9,12 +9,15 @@ const DEFAULT_CJK = [
   '成人', '福利', '里番', '无码', '有码', '三级', '情色', '色情', '麻豆', '蜜桃',
   '天美', '果冻', '狼友', '妖姬', '含羞草', '小妲己', '羞羞', '18禁', '18+', '🔞',
   '午夜', '啪啪', '榴莲', '香蕉', '草莓', '幸福宝', '少妇', '人妻', '女优', '约炮',
-  '乱伦', '援交', '禁片', '黄片', '性感', '尤物', '私房', '福利', '福利姬', '成人版',
+  '乱伦', '援交', '禁片', '黄片', '性感', '尤物', '私房', '福利姬', '成人版',
+  '激情', '杏吧', '海角', '糖心', '汤头条', '黑料', '国产精品', '番号',
 ];
 
 const DEFAULT_LATIN = [
   'porn', 'xxx', 'adult', 'hentai', 'javhd', '91porn', '18av', 'avmoo', 'sehuatang',
-  'madou', 'pron', 'nsfw',
+  'madou', 'pron', 'nsfw', 'swag', 'onlyfans', 'pornhub', 'xvideos', 'xhamster',
+  'spankbang', 'missav', 'jable', 'avgle', 'javbus', 'javdb', 'avsee', 'hanime',
+  'nhentai', '18comic', 'hsex',
 ];
 
 export const DEFAULT_ADULT_KEYWORDS = [...DEFAULT_CJK, ...DEFAULT_LATIN];
@@ -45,15 +48,15 @@ export function classifySite(site, keywords) {
   const name = typeof site.name === 'string' ? site.name : '';
   const api = typeof site.api === 'string' ? site.api : '';
   const ext = typeof site.ext === 'string' ? site.ext : '';
-  const nameLower = name.toLowerCase();
-  const latinHaystack = `${name} ${api} ${ext}`.toLowerCase();
+  // 中文同样要查 api / ext：不少成人源的站点名很普通，关键字藏在接口路径里
+  const haystack = `${name} ${api} ${ext}`.toLowerCase();
 
   for (const raw of words) {
     const token = String(raw || '').trim();
     if (!token) continue;
     if (hasCJK(token)) {
-      if (nameLower.includes(token.toLowerCase())) return 'av';
-    } else if (latinRegex(token).test(latinHaystack)) {
+      if (haystack.includes(token.toLowerCase())) return 'av';
+    } else if (latinRegex(token).test(haystack)) {
       return 'av';
     }
   }

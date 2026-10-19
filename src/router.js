@@ -17,8 +17,6 @@ const RESERVED = new Set(['tv', 'av', 'index', 'admin', 'api', 'assets', 'favico
 const HTML_HEADERS = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
 
 export async function route(request, env) {
-  await ensureBootstrap(env);
-
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method.toUpperCase();
@@ -28,6 +26,8 @@ export async function route(request, env) {
   if (path === '/api/public/status') return publicStatus(env);
 
   if (path.startsWith('/api/admin/')) {
+    // 后台接口要在读配置前先完成引导种子，否则首次请求可能读到空清单
+    await ensureBootstrap(env);
     const segments = path.slice('/api/admin/'.length).split('/').filter(Boolean);
     const isAuthed = await verifySession(env, request);
     return handleAdminApi(request, env, segments, isAuthed);

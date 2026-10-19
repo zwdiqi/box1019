@@ -12,14 +12,17 @@ export const KEY = {
   CONFIG: 'config',
   AUTH: 'auth',
   LAST_RUN: 'meta:lastRun',
+  SCHEDULE: 'meta:schedule',
   PIPELINE: 'pipeline',
   SUBS: 'subs',
+  LIVES: 'lives',
   SESSION_SECRET: 'secret:session',
 };
 
 export const TMP = {
   queue: (runId) => `tmp:${runId}:queue`,
   base: (runId) => `tmp:${runId}:base`,
+  live: (runId) => `tmp:${runId}:live`,
   raw: (runId, i) => `tmp:${runId}:raw:${i}`,
   done: (runId, i) => `tmp:${runId}:done:${i}`,
   rawPrefix: (runId) => `tmp:${runId}:raw:`,

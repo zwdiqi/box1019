@@ -14,7 +14,8 @@ import {
 } from '../core/auth.js';
 import { KEY } from '../core/keys.js';
 import { continueRun, getPipelineState, pipelineProgress, startRun } from '../core/pipeline.js';
-import { DEFAULT_CONFIG, ensureBootstrap, loadConfig } from '../core/sources.js';
+import { normalizeSchedule } from '../core/schedule.js';
+import { DEFAULT_CONFIG, loadConfig } from '../core/sources.js';
 import { getJSON, putJSON } from '../core/store.js';
 import { asArray, clampString, fail, isPlainObject, ok, readJsonBody, safeShallowCopy } from '../core/util.js';
 
@@ -24,6 +25,7 @@ const MAX_SOURCES = 500;
 const MAX_MANUAL = 1000;
 const MAX_SUBS = 50;
 const MAX_OVERRIDES = 5000;
+const MAX_LIVES = 500;
 
 // —— 输入清洗 ——
 
@@ -33,7 +35,13 @@ function sanitizeSources(value) {
     if (!isPlainObject(item)) continue;
     const url = clampString(item.url, 1000).trim();
     if (!/^https?:\/\//i.test(url)) continue;
-    out.push({ url, name: clampString(item.name, 100).trim(), enabled: item.enabled !== false });
+    out.push({
+      url,
+      name: clampString(item.name, 100).trim(),
+      enabled: item.enabled !== false,
+      // auto=按关键字自动判断；av/tv=整个源强制归入对应分类
+      category: item.category === 'av' || item.category === 'tv' ? item.category : 'auto',
+    });
   }
   return out;
 }
@@ -79,6 +87,27 @@ function sanitizeBlocklist(value) {
     .filter(Boolean);
 }
 
+function sanitizeLives(value) {
+  const out = [];
+  for (const item of asArray(value).slice(0, MAX_LIVES)) {
+    if (!isPlainObject(item)) continue;
+    const url = clampString(item.url, 1000).trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const entry = {
+      name: clampString(item.name, 100).trim(),
+      url,
+      type: Number.isFinite(Number(item.type)) ? Number(item.type) : 0,
+      enabled: item.enabled !== false,
+    };
+    const epg = clampString(item.epg, 1000).trim();
+    const logo = clampString(item.logo, 1000).trim();
+    if (epg) entry.epg = epg;
+    if (logo) entry.logo = logo;
+    out.push(entry);
+  }
+  return out;
+}
+
 function sanitizeSubs(value) {
   const out = [];
   const seen = new Set();
@@ -120,8 +149,12 @@ function sanitizeConfig(value) {
     tickSubrequestBudget: num(src.tickSubrequestBudget, DEFAULT_CONFIG.tickSubrequestBudget, 10, 10000),
     heartbeatSubrequestBudget: num(src.heartbeatSubrequestBudget, DEFAULT_CONFIG.heartbeatSubrequestBudget, 10, 1000),
     tickTimeBudgetMs: num(src.tickTimeBudgetMs, DEFAULT_CONFIG.tickTimeBudgetMs, 5000, 870000),
+    liveEnabled: src.liveEnabled !== false,
+    liveTimeoutMs: num(src.liveTimeoutMs, DEFAULT_CONFIG.liveTimeoutMs, 1000, 30000),
+    liveMinBytes: num(src.liveMinBytes, DEFAULT_CONFIG.liveMinBytes, 1, 100000),
     heartbeatEnabled: src.heartbeatEnabled !== false,
     customFilesEnabled: src.customFilesEnabled !== false,
+    autoUpdate: normalizeSchedule(isPlainObject(src.autoUpdate) ? src.autoUpdate : DEFAULT_CONFIG.autoUpdate),
   };
 }
 
@@ -129,14 +162,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function htmlLoginResponse(failMessage = '') {
-  return ok({ authed: false, message: failMessage });
-}
-
 // —— 会话 ——
 
 async function statePayload(env) {
-  const [lastRun, config, sources, manual, overrides, blocklist, subs, pipelineState, usingDefault] = await Promise.all([
+  const [lastRun, config, sources, manual, overrides, blocklist, subs, lives, pipelineState, usingDefault] = await Promise.all([
     getJSON(env, KEY.LAST_RUN, null),
     loadConfig(env),
     getJSON(env, KEY.SOURCES, []),
@@ -144,6 +173,7 @@ async function statePayload(env) {
     getJSON(env, KEY.OVERRIDES, {}),
     getJSON(env, KEY.BLOCKLIST, []),
     getJSON(env, KEY.SUBS, []),
+    getJSON(env, KEY.LIVES, []),
     getPipelineState(env),
     isUsingDefaultPassword(env),
   ]);
@@ -158,6 +188,7 @@ async function statePayload(env) {
     overrides: isPlainObject(overrides) ? overrides : {},
     blocklist: asArray(blocklist),
     subs: asArray(subs),
+    lives: sanitizeLives(lives),
   };
 }
 
@@ -170,6 +201,7 @@ const EXPORTABLE = {
   blocklist: KEY.BLOCKLIST,
   config: KEY.CONFIG,
   subs: KEY.SUBS,
+  lives: KEY.LIVES,
 };
 
 const IMPORTABLE = {
@@ -178,6 +210,7 @@ const IMPORTABLE = {
   overrides: { key: KEY.OVERRIDES, clean: sanitizeOverrides },
   blocklist: { key: KEY.BLOCKLIST, clean: sanitizeBlocklist },
   subs: { key: KEY.SUBS, clean: sanitizeSubs },
+  lives: { key: KEY.LIVES, clean: sanitizeLives },
 };
 
 /**
@@ -336,6 +369,22 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
     }
   }
 
+  // —— 直播源清单（自动检测有效后按速度并入 tv.json 的 lives） ——
+  if (path === 'lives') {
+    if (method === 'GET') return ok({ lives: sanitizeLives(await getJSON(env, KEY.LIVES, [])) });
+    if (method === 'POST') {
+      let body;
+      try {
+        body = await readJsonBody(request, 2 * 1024 * 1024);
+      } catch {
+        return fail('请求体格式不正确或过大');
+      }
+      const lives = sanitizeLives(isPlainObject(body) && 'lives' in body ? body.lives : body);
+      await putJSON(env, KEY.LIVES, lives);
+      return ok({ lives });
+    }
+  }
+
   // —— 自定义命名订阅文件 ——
   if (path === 'subs') {
     if (method === 'GET') return ok({ subs: sanitizeSubs(await getJSON(env, KEY.SUBS, [])) });
@@ -372,7 +421,7 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
     const type = isPlainObject(body) ? String(body.type || '') : '';
     const target = IMPORTABLE[type];
     if (!target) {
-      return fail('仅支持导入 manual / sources / overrides / blocklist / subs', 400);
+      return fail('仅支持导入 manual / sources / lives / overrides / blocklist / subs', 400);
     }
     const cleaned = target.clean(body.data);
     await putJSON(env, target.key, cleaned);
@@ -402,5 +451,3 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
 
   return fail(`接口不存在：/api/admin/${path}`, 404);
 }
-
-export { htmlLoginResponse };

@@ -71,15 +71,20 @@ export async function buildCustomFile(env, def) {
     return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
   });
 
+  // 直播源随普通源一起输出（沿用 tv.json 里已检测有效的、按速度排好序的 lives）
+  const lives = def.includeTv === false || !tvFile || !Array.isArray(tvFile.lives) ? [] : tvFile.lives;
+
   return {
     ...envelope,
     sites,
+    lives,
     _meta: {
       generator: 'tvbox-organizer',
       name: def.name,
       title: def.title || def.name,
       updated: nowIso(),
       count: sites.length,
+      liveCount: lives.length,
     },
   };
 }
@@ -96,15 +101,17 @@ export async function serveCustom(env, name) {
 /** 公开页用的轻量状态：只读 meta:lastRun 与 subs，避免拉取大文件 */
 export async function publicStatus(env) {
   await ensureBootstrap(env);
-  const cfg = await loadConfig(env);
-  const [lastRun, subs] = await Promise.all([
+  const [cfg, lastRun, subs] = await Promise.all([
+    loadConfig(env),
     getJSON(env, KEY.LAST_RUN, null),
     getJSON(env, KEY.SUBS, []),
   ]);
 
   return ok({
     updatedAt: lastRun ? lastRun.time : null,
-    counts: lastRun && lastRun.counts ? lastRun.counts : { sources: 0, sites: 0, alive: 0, dead: 0, tv: 0, av: 0 },
+    counts: lastRun && lastRun.counts
+      ? lastRun.counts
+      : { sources: 0, sites: 0, alive: 0, dead: 0, tv: 0, av: 0, live: 0 },
     errorCount: lastRun ? lastRun.errorCount || 0 : 0,
     durationMs: lastRun ? lastRun.durationMs ?? null : null,
     customFilesEnabled: cfg.customFilesEnabled !== false,

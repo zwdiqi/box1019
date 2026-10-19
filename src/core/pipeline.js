@@ -1,7 +1,7 @@
 /**
  * 聚合流水线（可断点续跑的状态机）。
  *
- * 阶段：fetch → speed → rank → done
+ * 阶段：fetch → speed → live → rank → done
  *
  * 为什么要分段：免费版 Worker 单次只有 50 个子请求 / 10ms CPU，
  * 一次调用跑不完整个整理流程。因此每个阶段都按「预算」切成多个 tick，
@@ -9,15 +9,17 @@
  */
 import { classifySite } from './classify.js';
 import { KEY, TMP } from './keys.js';
+import { dedupeLives, isValidLiveText, isTestableLive, liveId, sortLivesBySpeed, stripLive, toOutputLive } from './lives.js';
 import { dedupeById, mergeUserState, prepareManual, sortBySpeed, toOutputSite } from './merge.js';
 import { buildEnvelope, buildSite, parseConfig, siteId } from './normalize.js';
 import { getEnabledSources, loadConfig } from './sources.js';
-import { fetchText, isTestable, mapLimit, probe } from './speedtest.js';
+import { fetchLimited, fetchText, isTestable, mapLimit, probe } from './speedtest.js';
 import { del, deletePrefix, getJSON, getManyJSON, listKeys, putJSON } from './store.js';
 import { isPlainObject, nowIso, randomHex } from './util.js';
 
 const MAX_ERRORS = 200;
 const CHECKPOINT_INTERVAL_MS = 1500;
+const LIVE_MAX_BYTES = 65536;
 
 export async function startRun(env, reason = 'manual') {
   const sources = await getEnabledSources(env);
@@ -25,7 +27,12 @@ export async function startRun(env, reason = 'manual') {
     return { error: '没有启用的源地址，无法开始整理。请先在后台「源地址清单」中添加或启用。' };
   }
   const runId = `${Date.now().toString(36)}-${randomHex(3)}`;
-  const queue = sources.map((s) => ({ url: s.url, name: String(s.name || ''), depth: 0 }));
+  const queue = sources.map((s) => ({
+    url: s.url,
+    name: String(s.name || ''),
+    depth: 0,
+    category: s.category === 'av' || s.category === 'tv' ? s.category : 'auto',
+  }));
   await putJSON(env, TMP.queue(runId), queue);
   const stamp = nowIso();
   const state = {
@@ -35,8 +42,9 @@ export async function startRun(env, reason = 'manual') {
     sourceCursor: 0,
     chunkCursor: 0,
     chunkCount: 0,
+    liveCursor: 0,
     baseCaptured: false,
-    counts: { sources: 0, sites: 0, tested: 0, alive: 0, dead: 0, av: 0, tv: 0 },
+    counts: { sources: 0, sites: 0, tested: 0, alive: 0, dead: 0, av: 0, tv: 0, live: 0 },
     errors: [],
     startedAt: stamp,
     updatedAt: stamp,
@@ -63,7 +71,10 @@ async function tickFetch(env, state, ctx) {
         const prepared = [];
         for (const raw of parsed.sites) {
           if (!isPlainObject(raw)) continue;
-          prepared.push(buildSite(raw, item.url));
+          const site = buildSite(raw, item.url);
+          // 记住来源的分类标注，供测速阶段决定 _cat
+          site._srcCat = item.category === 'av' || item.category === 'tv' ? item.category : 'auto';
+          prepared.push(site);
           if (prepared.length >= cfg.maxSites) break;
         }
         for (let i = 0; i < prepared.length; i += cfg.chunkSize) {
@@ -82,7 +93,12 @@ async function tickFetch(env, state, ctx) {
         for (const repo of parsed.repos) {
           if (queue.length >= cfg.maxRepos) break;
           if (queue.some((x) => x.url === repo.url)) continue;
-          queue.push({ url: repo.url, name: repo.name, depth: (item.depth || 0) + 1 });
+          queue.push({
+            url: repo.url,
+            name: repo.name,
+            depth: (item.depth || 0) + 1,
+            category: item.category || 'auto',
+          });
           queueChanged = true;
         }
       } else {
@@ -106,7 +122,8 @@ async function tickSpeed(env, state, ctx) {
   let processed = 0;
 
   while (state.chunkCursor < state.chunkCount && Date.now() < ctx.deadline) {
-    if (processed > 0 && ctx.budgetLeft <= 0) break;
+    // 剩余预算不够跑完一个分片时就停下，避免超发外部请求（免费版单次上限 50）
+    if (processed > 0 && ctx.budgetLeft < cfg.chunkSize) break;
     const key = TMP.raw(state.runId, state.chunkCursor);
     const chunk = await getJSON(env, key, null);
     if (!Array.isArray(chunk)) {
@@ -116,7 +133,10 @@ async function tickSpeed(env, state, ctx) {
     }
 
     const flags = chunk.map(isTestable);
-    for (const site of chunk) site._cat = classifySite(site, cfg.adultKeywords);
+    for (const site of chunk) {
+      const forced = site._srcCat;
+      site._cat = forced === 'av' || forced === 'tv' ? forced : classifySite(site, cfg.adultKeywords);
+    }
 
     const testables = chunk.filter((_, i) => flags[i]);
     const results = testables.length
@@ -155,6 +175,65 @@ async function tickSpeed(env, state, ctx) {
   return state.chunkCursor >= state.chunkCount;
 }
 
+/**
+ * 直播源阶段：读取后台配置的直播源清单，逐个探测有效性并记录 TTFB（毫秒）。
+ * 结果写入单个 tmp key，rank 阶段再把「有效」的按速度并入 tv.json 的 lives。
+ */
+async function tickLive(env, state, ctx) {
+  const cfg = ctx.cfg;
+  const list = await getJSON(env, KEY.LIVES, []);
+  const enabled = Array.isArray(list) ? list.filter((l) => isPlainObject(l) && l.enabled !== false) : [];
+  if (cfg.liveEnabled === false) {
+    await putJSON(env, TMP.live(state.runId), []);
+    state.liveCursor = enabled.length;
+    return true;
+  }
+
+  let results = await getJSON(env, TMP.live(state.runId), null);
+  if (!Array.isArray(results)) results = [];
+  let cursor = state.liveCursor || 0;
+
+  while (cursor < enabled.length && ctx.budgetLeft > 0 && Date.now() < ctx.deadline) {
+    const take = Math.min(enabled.length - cursor, Math.max(1, Math.min(ctx.budgetLeft, cfg.probeConcurrency * 2)));
+    const batch = enabled.slice(cursor, cursor + take);
+    const testables = batch.filter(isTestableLive);
+    ctx.budgetLeft -= testables.length;
+    const probed = testables.length
+      ? await mapLimit(testables, cfg.probeConcurrency, (l) =>
+          fetchLimited(l.url, cfg.liveTimeoutMs, LIVE_MAX_BYTES),
+        )
+      : [];
+
+    let pi = 0;
+    for (const live of batch) {
+      const out = stripLive(live);
+      out._latency = null;
+      out._id = liveId(live);
+      if (isTestableLive(live)) {
+        const r = probed[pi];
+        pi += 1;
+        if (r && r.ok && isValidLiveText(r.text, cfg.liveMinBytes)) {
+          out._ok = true;
+          out._latency = r.ms;
+        } else {
+          out._ok = false;
+          out._err = (r && r.error) || '内容无效（过短或非列表）';
+        }
+      } else {
+        // 非 http / type 3 无法直测，保留并标注未测速
+        out._ok = null;
+      }
+      results.push(out);
+    }
+    cursor += batch.length;
+  }
+
+  state.liveCursor = cursor;
+  state.counts.live = results.filter((x) => x._ok !== false).length;
+  await putJSON(env, TMP.live(state.runId), results);
+  return cursor >= enabled.length;
+}
+
 async function tickRank(env, state, ctx) {
   const cfg = ctx.cfg;
   const keys = await listKeys(env, TMP.donePrefix(state.runId));
@@ -167,11 +246,12 @@ async function tickRank(env, state, ctx) {
     }
   }
 
-  const [overrides, blocklist, manual, base] = await Promise.all([
+  const [overrides, blocklist, manual, base, liveRaw] = await Promise.all([
     getJSON(env, KEY.OVERRIDES, {}),
     getJSON(env, KEY.BLOCKLIST, []),
     getJSON(env, KEY.MANUAL, { av: [], tv: [] }),
     getJSON(env, TMP.base(state.runId), null),
+    getJSON(env, TMP.live(state.runId), []),
   ]);
 
   const alive = collected.filter((s) => s._ok !== false);
@@ -199,10 +279,23 @@ async function tickRank(env, state, ctx) {
     dead,
   };
 
+  // 直播源：只保留检测有效的（未测速的也保留），按测速升序；再与基础配置里的 lives 去重合并
+  const testedLives = (Array.isArray(liveRaw) ? liveRaw : []).filter((l) => l && l._ok !== false);
+  const envelopeLives = Array.isArray(envelope.lives) ? envelope.lives.filter(isPlainObject) : [];
+  const lives = sortLivesBySpeed(dedupeLives([...testedLives, ...envelopeLives])).map(toOutputLive);
+
   const tvFile = {
     ...envelope,
     sites: tvSites,
-    _meta: { generator: 'tvbox-organizer', category: 'tv', updated: stamp, count: tvSites.length, ...common },
+    lives,
+    _meta: {
+      generator: 'tvbox-organizer',
+      category: 'tv',
+      updated: stamp,
+      count: tvSites.length,
+      liveCount: lives.length,
+      ...common,
+    },
   };
   const avFile = {
     ...envelope,
@@ -216,6 +309,7 @@ async function tickRank(env, state, ctx) {
 
   state.counts.tv = tvSites.length;
   state.counts.av = avSites.length;
+  state.counts.live = lives.length;
 
   const startedMs = Date.parse(state.startedAt);
   await putJSON(env, KEY.LAST_RUN, {
@@ -257,6 +351,12 @@ export async function continueRun(env, { budget = 9000, deadlineMs = 780000 } = 
       }
     } else if (state.phase === 'speed') {
       const done = await tickSpeed(env, state, ctx);
+      if (done) {
+        state.phase = 'live';
+        state.liveCursor = 0;
+      }
+    } else if (state.phase === 'live') {
+      const done = await tickLive(env, state, ctx);
       if (done) state.phase = 'rank';
     } else if (state.phase === 'rank') {
       await tickRank(env, state, ctx);
@@ -290,8 +390,9 @@ export function pipelineProgress(state) {
   else if (phase === 'fetch') percent = state.chunkCount ? 5 : 2;
   else if (phase === 'speed') {
     const total = Math.max(1, state.chunkCount || 1);
-    percent = 5 + Math.round(((state.chunkCursor || 0) / total) * 85);
-  } else if (phase === 'rank') percent = 95;
+    percent = 5 + Math.round(((state.chunkCursor || 0) / total) * 80);
+  } else if (phase === 'live') percent = 88;
+  else if (phase === 'rank') percent = 95;
   return {
     runId: state.runId || null,
     phase,
@@ -299,6 +400,7 @@ export function pipelineProgress(state) {
     sourceCursor: state.sourceCursor || 0,
     chunkCursor: state.chunkCursor || 0,
     chunkCount: state.chunkCount || 0,
+    liveCursor: state.liveCursor || 0,
     counts: state.counts || {},
     errors: (state.errors || []).slice(0, 20),
     errorCount: (state.errors || []).length,
