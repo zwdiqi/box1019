@@ -389,7 +389,7 @@ function renderPreviewTable(){
     if(tr) lat=testBadge(tr);
     else if(s._latency==null||!isFinite(s._latency)) lat='<span class="lat na">未测速</span>';
     else lat='<span class="lat '+(s._latency<400?'fast':(s._latency<1200?'mid':'slow'))+'">'+Math.round(s._latency)+' ms</span>';
-    var testable=/^https?:\/\//i.test(String(s.api||''));
+    var testable=/^https?:/i.test(String(s.api||''));
     return '<tr data-id="'+esc(id)+'">'+
       '<td>'+(testable?'<input type="checkbox" class="prev-sel" data-url="'+esc(s.api)+'"'+(PREV.sel[s.api]?' checked':'')+'>':'')+'</td>'+
       '<td class="muted">'+(i+1)+'</td>'+
@@ -1000,7 +1000,7 @@ function handle(act,btn){
       turls=$$('#prevRows input.prev-sel').filter(function(c){ return c.checked; }).map(function(c){ return c.getAttribute('data-url'); }).filter(Boolean);
       if(!turls.length){ toast('请先勾选要测试的源（单个或多个均可）'); return Promise.resolve(); }
     }else{
-      turls=prevSites().map(function(s){ return s.api; }).filter(function(u){ return /^https?:\/\//i.test(String(u||'')); }).slice(0,60);
+      turls=prevSites().map(function(s){ return s.api; }).filter(function(u){ return /^https?:/i.test(String(u||'')); }).slice(0,60);
       if(!turls.length){ toast('没有可测试的接口地址（csp_ 爬虫需本地解析，无法在线测速）'); return Promise.resolve(); }
     }
     var tst=document.getElementById('prevStat'); if(tst) tst.textContent='准备测速…';
@@ -1033,7 +1033,7 @@ function handle(act,btn){
   if(act==='test-src'){
     var row=btn.closest('tr');
     var surl=row.querySelector('[name=url]').value.trim();
-    if(!/^https?:\/\//i.test(surl)){ toast('请先填写有效的源地址（http/https）'); return Promise.resolve(); }
+    if(!/^https?:/i.test(surl)){ toast('请先填写有效的源地址（http/https）'); return Promise.resolve(); }
     var scell=row.querySelector('[data-testid]');
     if(scell) scell.innerHTML='<span class="lat na">测试中…</span>';
     return req('POST','/api/admin/test',{kind:'source',urls:[surl]}).then(function(d){
@@ -1046,7 +1046,7 @@ function handle(act,btn){
     var surls=[];
     $$('#srcRows tr').forEach(function(tr){
       var u=tr.querySelector('[name=url]').value.trim();
-      if(/^https?:\/\//i.test(u)) surls.push(u);
+      if(/^https?:/i.test(u)) surls.push(u);
     });
     if(!surls.length){ toast('清单里没有有效的源地址'); return Promise.resolve(); }
     if(surls.length>60){ surls=surls.slice(0,60); toast('地址较多，本次测试前 60 条'); }
@@ -1067,7 +1067,7 @@ function handle(act,btn){
   if(act==='test-live'){
     var lrow=btn.closest('tr');
     var lurl=lrow.querySelector('[name=url]').value.trim();
-    if(!/^https?:\/\//i.test(lurl)){ toast('请先填写有效的直播源地址'); return Promise.resolve(); }
+    if(!/^https?:/i.test(lurl)){ toast('请先填写有效的直播源地址'); return Promise.resolve(); }
     var lcell=lrow.querySelector('[data-testid]');
     if(lcell) lcell.innerHTML='<span class="lat na">测试中…</span>';
     return req('POST','/api/admin/test',{kind:'live',urls:[lurl]}).then(function(d){
@@ -1080,7 +1080,7 @@ function handle(act,btn){
     var lurls=[];
     $$('#liveRows tr').forEach(function(tr){
       var u=tr.querySelector('[name=url]').value.trim();
-      if(/^https?:\/\//i.test(u)) lurls.push(u);
+      if(/^https?:/i.test(u)) lurls.push(u);
     });
     if(!lurls.length){ toast('清单里没有有效的直播源地址'); return Promise.resolve(); }
     if(lurls.length>60){ lurls=lurls.slice(0,60); toast('地址较多，本次测试前 60 条'); }
