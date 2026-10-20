@@ -71,7 +71,7 @@ async function tickFetch(env, state, ctx) {
     const item = queue[state.sourceCursor];
     ctx.budgetLeft -= 1;
     try {
-      const text = await fetchText(item.url, cfg.fetchTimeoutMs);
+      const text = await fetchText(item.url, cfg.fetchTimeoutMs, cfg.userAgent);
       const parsed = parseConfig(text, item.url);
       if (parsed.kind === 'config') {
         const prepared = [];
@@ -158,7 +158,7 @@ async function tickSpeed(env, state, ctx) {
 
     const testables = chunk.filter((_, i) => flags[i]);
     const results = testables.length
-      ? await mapLimit(testables, cfg.probeConcurrency, (s) => probe(s.api, cfg.probeTimeoutMs))
+      ? await mapLimit(testables, cfg.probeConcurrency, (s) => probe(s.api, cfg.probeTimeoutMs, undefined, cfg.userAgent))
       : [];
     ctx.budgetLeft -= testables.length;
     state.counts.tested += testables.length;
@@ -223,7 +223,7 @@ async function tickLive(env, state, ctx) {
     ctx.budgetLeft -= testables.length;
     const probed = testables.length
       ? await mapLimit(testables, cfg.probeConcurrency, (l) =>
-          fetchLimited(l.url, cfg.liveTimeoutMs, LIVE_MAX_BYTES),
+          fetchLimited(l.url, cfg.liveTimeoutMs, LIVE_MAX_BYTES, l.ua || cfg.userAgent),
         )
       : [];
 
@@ -297,7 +297,6 @@ async function tickRank(env, state, ctx) {
   const tvSites = applyManualOrder(sortBySpeed(dedupeById([...autoTv, ...manualTv])), siteOrderOf('tv')).map(toOutputSite);
   const avSites = applyManualOrder(sortBySpeed(dedupeById([...autoAv, ...manualAv])), siteOrderOf('av')).map(toOutputSite);
 
-  const envelope = (base && base.envelope) || {};
   const stamp = nowIso();
   const common = {
     sources: state.counts.sources,
@@ -306,18 +305,16 @@ async function tickRank(env, state, ctx) {
     dead,
   };
 
-  // 直播源：只保留检测有效的（未测速的也保留），按测速升序；再与基础配置里的 lives 去重合并；最后套用手动排序
+  // 直播源：只保留检测有效的（未测速的也保留），按测速升序；最后套用手动排序
   const testedLives = (Array.isArray(liveRaw) ? liveRaw : []).filter((l) => l && l._ok !== false);
-  const envelopeLives = Array.isArray(envelope.lives) ? envelope.lives.filter(isPlainObject) : [];
   const liveOrderMap = isPlainObject(order.lives) ? order.lives : {};
   const lives = applyManualOrder(
-    sortLivesBySpeed(dedupeLives([...testedLives, ...envelopeLives])),
+    sortLivesBySpeed(dedupeLives(testedLives)),
     liveOrderMap,
     (l) => (l && l._id) || liveId(l),
   ).map(toOutputLive);
 
   const tvFile = {
-    ...envelope,
     sites: tvSites,
     lives,
     _meta: {
@@ -330,14 +327,13 @@ async function tickRank(env, state, ctx) {
     },
   };
   const avFile = {
-    ...envelope,
     sites: avSites,
     _meta: { generator: 'tvbox-organizer', category: 'av', updated: stamp, count: avSites.length, ...common },
   };
 
   await putConfig(env, KEY.TV, tvFile);
   await putConfig(env, KEY.AV, avFile);
-  await putJSON(env, KEY.BASE, { sourceUrl: base ? base.sourceUrl : null, envelope, updatedAt: stamp });
+  await putJSON(env, KEY.BASE, { sourceUrl: base ? base.sourceUrl : null, envelope: base && base.envelope ? base.envelope : {}, updatedAt: stamp });
 
   state.counts.tv = tvSites.length;
   state.counts.av = avSites.length;

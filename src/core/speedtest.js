@@ -4,8 +4,39 @@
  * Worker 里无法做 TCP / 爬虫类探测，只能对 http(s) 形式的接口地址发请求测 TTFB。
  * 判定标准：只要拿到响应头就算「连通」（403/404 也算通），请求异常/超时才判为失效。
  * 直播源（m3u/txt 列表）另需读取正文判定有效性，因此额外提供限长读取的探测函数。
+ *
+ * 新特性：
+ *  - 支持 URL 内 `user:pass@host` 形式的加密连接（自动转为 Authorization: Basic header）
+ *  - 支持自定义 User-Agent（每个请求都可覆盖全局 UA）
  */
 import { decryptContent } from './decrypt.js';
+
+const DEFAULT_UA = 'okhttp/4.9.0';
+
+/**
+ * 从 URL 中提取 `user:pass@` 形式的 Basic Auth 凭据。
+ * 返回 { cleanUrl, userinfo } 或 null（无凭据）。
+ * Cloudflare fetch 会忽略 URL 中的 userinfo，必须手动拆出并加 Authorization header。
+ */
+export function extractBasicAuth(url) {
+  if (typeof url !== 'string') return null;
+  const m = url.match(/^([a-z]+:\/\/)([^/@]+)@(.+)$/i);
+  if (!m) return null;
+  return { cleanUrl: m[1] + m[3], userinfo: m[2] };
+}
+
+/** 构建 fetch 的 headers：处理 Basic Auth + UA + Accept */
+function buildHeaders(url, ua) {
+  const headers = { Accept: '*/*' };
+  if (ua) headers['User-Agent'] = ua;
+  const auth = extractBasicAuth(url);
+  if (auth) {
+    headers['Authorization'] = 'Basic ' + btoa(decodeURIComponent(auth.userinfo));
+    // URL 里去掉 userinfo，返回 cleanUrl
+    return { headers, cleanUrl: auth.cleanUrl };
+  }
+  return { headers, cleanUrl: url };
+}
 
 export function isTestable(site) {
   const api = typeof site.api === 'string' ? site.api : '';
@@ -18,11 +49,18 @@ export function isTestable(site) {
 /** 源文件下载上限（字节）：防止异常大的文件撑爆 Worker 内存 */
 const SOURCE_MAX_BYTES = 2 * 1024 * 1024;
 
-export async function fetchText(url, timeoutMs = 8000) {
-  const res = await fetch(url, {
+/**
+ * 下载源配置文件，自动处理 URL 中的 Basic Auth 和自定义 UA。
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @param {string} [ua] User-Agent，默认 okhttp/4.9.0
+ */
+export async function fetchText(url, timeoutMs = 8000, ua = DEFAULT_UA) {
+  const { headers, cleanUrl } = buildHeaders(url, ua);
+  const res = await fetch(cleanUrl, {
     method: 'GET',
     redirect: 'follow',
-    headers: { 'User-Agent': 'okhttp/4.9.0', Accept: '*/*' },
+    headers,
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -36,13 +74,21 @@ export async function fetchText(url, timeoutMs = 8000) {
 /** 探测正文读取上限（字节）：用于测速同时抓取内容做成人/普通分类 */
 export const PROBE_BODY_MAX_BYTES = 32 * 1024;
 
-export async function probe(url, timeoutMs = 8000, maxBytes = PROBE_BODY_MAX_BYTES) {
+/**
+ * 探测接口地址的连通性与速度，自动处理 URL Basic Auth 和自定义 UA。
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @param {number} [maxBytes]
+ * @param {string} [ua] User-Agent，默认 okhttp/4.9.0
+ */
+export async function probe(url, timeoutMs = 8000, maxBytes = PROBE_BODY_MAX_BYTES, ua = DEFAULT_UA) {
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
+    const { headers, cleanUrl } = buildHeaders(url, ua);
+    const res = await fetch(cleanUrl, {
       method: 'GET',
       redirect: 'follow',
-      headers: { 'User-Agent': 'okhttp/4.9.0', Accept: '*/*' },
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
     const ms = Date.now() - t0;
@@ -89,15 +135,20 @@ async function readLimited(res, maxBytes) {
 
 /**
  * 探测直播源地址：下载正文（限长）并返回 TTFB。
- * @returns {Promise<{ok:boolean, ms:number, status:number, text:string, error?:string}>}
+ * 自动处理 URL 中的 Basic Auth（user:pass@host）和自定义 UA。
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @param {number} maxBytes
+ * @param {string} [ua] User-Agent，缺省时不设置 UA（由 Worker 默认决定）
  */
-export async function fetchLimited(url, timeoutMs = 10000, maxBytes = 65536) {
+export async function fetchLimited(url, timeoutMs = 10000, maxBytes = 65536, ua) {
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
+    const { headers, cleanUrl } = buildHeaders(url, ua);
+    const res = await fetch(cleanUrl, {
       method: 'GET',
       redirect: 'follow',
-      headers: { 'User-Agent': 'okhttp/4.9.0', Accept: '*/*' },
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
     const ms = Date.now() - t0;

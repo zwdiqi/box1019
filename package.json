@@ -2,7 +2,7 @@
   "name": "tvbox-organizer",
   "version": "1.0.0",
   "private": true,
-  "description": "TVBox 源自动整理系统（Cloudflare Workers + KV + Cron）",
+  "description": "源自动整理系统（Cloudflare Workers + KV + Cron）",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

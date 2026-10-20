@@ -7,7 +7,6 @@
   var f = document.getElementById('f');
   var pwd = document.getElementById('pwd');
   var hint = document.getElementById('hint');
-  var tip = document.getElementById('tip');
   var toastEl = document.getElementById('toast');
 
   function toast(msg, err) {

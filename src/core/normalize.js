@@ -153,7 +153,7 @@ export function buildSite(raw, baseUrl) {
   return site;
 }
 
-const ENVELOPE_KEYS = ['spider', 'lives'];
+const ENVELOPE_KEYS = [];
 
 /**
  * 按 TVBox 订阅源的标准排版序列化配置：
@@ -162,7 +162,7 @@ const ENVELOPE_KEYS = ['spider', 'lives'];
  *  - 直播源字段顺序：name/type/url/epg/playerType…，内部字段放最后
  *  - 2 空格缩进的美化输出（与常见 TVBox 订阅文件一致）
  */
-const CONFIG_KEY_ORDER = ['spider', 'wallpaper', 'sites', 'lives', 'parses', 'flags', 'ijk', 'doh', 'rules', 'ads'];
+const CONFIG_KEY_ORDER = ['wallpaper', 'sites', 'lives', 'parses', 'flags', 'ijk', 'doh', 'rules', 'ads'];
 const SITE_KEY_ORDER = ['key', 'name', 'type', 'api', 'searchable', 'quickSearch', 'filterable', 'ext', 'jar', 'playerType', 'ua', 'header', 'timeout'];
 const LIVE_KEY_ORDER = ['name', 'type', 'url', 'epg', 'playerType', 'ua', 'header', 'logo'];
 
@@ -198,21 +198,10 @@ export function serializeConfig(data) {
   return JSON.stringify(out, null, 2);
 }
 
-/** 提取 TVBox 信封（spider / lives），并解析其中的相对路径；不含 sites */
+/** 提取 TVBox 信封（仅保留非 spider/lives 等可透传字段；不含 sites）
+ * 注：从 v2 起，数据源只读取 sites 数组，spider / lives 等均不再提取。
+ * 系统生成的 lives 由 pipeline 在输出阶段写入，不依赖信封。
+ */
 export function buildEnvelope(envelope, baseUrl) {
-  const out = {};
-  for (const k of ENVELOPE_KEYS) {
-    if (envelope[k] === undefined) continue;
-    out[k] = envelope[k];
-  }
-  if (typeof out.spider === 'string') out.spider = absolutizeSpider(out.spider, baseUrl);
-  if (Array.isArray(out.lives)) {
-    out.lives = out.lives.filter(isPlainObject).map((l) => {
-      const next = { ...l };
-      if (next.url !== undefined) next.url = absolutizeValue(next.url, baseUrl);
-      if (next.logo !== undefined) next.logo = absolutizeValue(next.logo, baseUrl);
-      return next;
-    });
-  }
-  return out;
+  return {};
 }

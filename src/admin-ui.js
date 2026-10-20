@@ -251,7 +251,9 @@ function loadFiles(){
   function file(path){
     return fetch(path,{credentials:'same-origin',cache:'no-store'}).then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; });
   }
-  return Promise.all([file('/tv.json'),file('/av.json')]).then(function(r){ S.tv=r[0]; S.av=r[1]; });
+  var tvFn='tv', avFn='av';
+  if(S.state&&S.state.config){ tvFn=S.state.config.tvFilename||'tv'; avFn=S.state.config.avFilename||'av'; }
+  return Promise.all([file('/'+tvFn+'.json'),file('/'+avFn+'.json')]).then(function(r){ S.tv=r[0]; S.av=r[1]; });
 }
 
 function render(){
@@ -410,10 +412,13 @@ function renderPreviewTable(){
 // 订阅链接：后台里直接给出可用的 TVBox 订阅地址
 function subsLinksCard(st){
   var origin=location.origin;
+  var cfg=(st&&st.config)||{};
+  var tvFn=cfg.tvFilename||'tv';
+  var avFn=cfg.avFilename||'av';
   var html='<h2>订阅链接</h2>'+
     '<p class="muted small">把下面的地址填入 TVBox 的「配置地址」即可使用。若域名是 workers.dev / pages.dev，国内通常无法访问，请先绑定自有域名。</p>'+
-    linkBox('普通源',origin+'/tv.json')+
-    linkBox('成人源',origin+'/av.json');
+    linkBox('普通源',origin+'/'+tvFn+'.json')+
+    linkBox('成人源',origin+'/'+avFn+'.json');
   var subs=(st&&st.subs)||[];
   var enabled=!(st&&st.config&&st.config.customFilesEnabled===false);
   if(subs.length&&enabled){
@@ -565,8 +570,9 @@ function renderLives(){
   var rows=list.map(function(l,i){
     return '<tr data-i="'+i+'">'+
       '<td><input name="name" value="'+esc(l.name)+'" placeholder="直播源名"></td>'+
-      '<td><input name="url" class="mono" value="'+esc(l.url)+'" placeholder="https://.../live.m3u"></td>'+
+      '<td><input name="url" class="mono" value="'+esc(l.url)+'" placeholder="https://user:pass@host/...m3u"></td>'+
       '<td class="tight" style="width:80px"><input name="type" value="'+esc(l.type==null?'':l.type)+'" placeholder="type"></td>'+
+      '<td><input name="ua" class="mono" value="'+esc(l.ua)+'" placeholder="UA（可空，留空用全局）"></td>'+
       '<td><input name="epg" value="'+esc(l.epg)+'" placeholder="EPG（可空）"></td>'+
       '<td class="tight"><input type="checkbox" name="enabled"'+(l.enabled!==false?' checked':'')+'></td>'+
       '<td class="small" data-testid="1">'+testBadge(LIVETEST[l.url],'live')+'</td>'+
@@ -578,9 +584,10 @@ function renderLives(){
   var html=card(
     '<h2>直播源清单</h2>'+
     '<p class="muted small">这些直播源会在整理时被自动下载检测：<b>只有检测正常的才会写入 tv.json 的 lives 数组，并按检测速度（毫秒）升序排列</b>。'+
-      '「测试」按钮可在线验证单个或全部直播源（显示耗时与内容有效性）；「↑ / ↓」可调整清单顺序（保存清单后生效，同时作为整理时的手动排序依据）。'+
+      'URL 支持 <code>https://user:pass@host/path</code> 形式的加密连接（自动转为 Basic Auth）。'+
+      '每行可单独设置 UA（留空用配置里的全局 UA）。'+
       (liveEnabled?'':'<b>（当前配置已关闭直播源自动更新）</b>')+'</p>'+
-    '<table><thead><tr><th>名称</th><th>地址</th><th>type</th><th>EPG</th><th>启用</th><th style="width:110px">测试结果</th><th style="width:60px">测试</th><th style="width:80px">排序</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
+    '<table><thead><tr><th>名称</th><th>地址</th><th style="width:60px">type</th><th style="width:200px">UA（可空）</th><th>EPG</th><th style="width:44px">启用</th><th style="width:110px">测试结果</th><th style="width:60px">测试</th><th style="width:80px">排序</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
     '<div class="toolbar" style="margin-top:12px">'+
       '<button class="ghost" data-act="add-live">新增一行</button>'+
       '<button data-act="save-lives">保存清单</button>'+
@@ -639,11 +646,13 @@ function collectLives(){
     var name=tr.querySelector('[name=name]').value.trim();
     var url=tr.querySelector('[name=url]').value.trim();
     var typeRaw=tr.querySelector('[name=type]').value.trim();
+    var ua=tr.querySelector('[name=ua]').value.trim();
     var epg=tr.querySelector('[name=epg]').value.trim();
     var enabled=tr.querySelector('[name=enabled]').checked;
     if(!url) return;
     var item={name:name,url:url,enabled:enabled};
     if(typeRaw!=='' && !isNaN(Number(typeRaw))) item.type=Number(typeRaw);
+    if(ua) item.ua=ua;
     if(epg) item.epg=epg;
     out.push(item);
   });
@@ -707,7 +716,11 @@ function renderOutput(){
     }).join(''));
   }
   if(bl.length){
-    html+=card('<h2>已删除（blocklist）</h2><p class="muted small">「恢复」将源放回输出列表；「彻底删除」立即从当前 tv.json / av.json 中移除该源，并永久拦截自动整理重新加入。</p>'+bl.map(function(id){
+    html+=card('<h2>已删除（blocklist）</h2><p class="muted small">「恢复」将源放回输出列表；「彻底删除」立即从当前 tv.json / av.json 中移除该源，并永久拦截自动整理重新加入。</p>'+
+      '<div class="toolbar" style="margin-top:10px;margin-bottom:10px">'+
+        '<button class="danger" data-act="clear-blocklist">全部清除（共 '+bl.length+' 条）</button>'+
+      '</div>'+
+      bl.map(function(id){
       return '<span class="chip mono">'+esc(id)+
         '<button data-act="unblock" data-id="'+esc(id)+'">恢复</button>'+
         '<button class="danger" data-act="purge" data-id="'+esc(id)+'">彻底删除</button>'+
@@ -839,8 +852,17 @@ function renderConfig(){
     '<textarea id="kw">'+esc(kw)+'</textarea>'
   );
   html+=card(
+    '<h2>输出订阅文件名</h2>'+
+    '<p class="muted small">默认输出为 <code>/tv.json</code> 和 <code>/av.json</code>，可在此修改为任意名称（如 <code>a07v</code>），TVBox 里的配置地址相应改为 <code>/a07v.json</code>。只允许字母、数字、下划线、短横线，不能与自定义订阅重名。</p>'+
+    '<div class="grid">'+
+      cfgField('tvFilename','普通源文件名（不含 .json）',c.tvFilename||'tv')+
+      cfgField('avFilename','成人源文件名（不含 .json）',c.avFilename||'av')+
+    '</div>'
+  );
+  html+=card(
     '<h2>抓取与测速参数</h2>'+
     '<div class="grid">'+
+      '<div class="stat" style="grid-column:span 2"><div class="k">全局 User-Agent（下载 / 测速 / 直播源探测均使用）</div><input name="userAgent" value="'+esc(c.userAgent||'okhttp/4.9.0')+'"></div>'+
       cfgField('fetchTimeoutMs','下载超时(ms)',c.fetchTimeoutMs)+
       cfgField('probeTimeoutMs','测速超时(ms)',c.probeTimeoutMs)+
       cfgField('probeConcurrency','测速并发(1-5)',c.probeConcurrency)+
@@ -869,10 +891,12 @@ function cfgField(name,label,val){
 
 function collectConfig(){
   var cfg={};
+  var STRING_FIELDS={'userAgent':true,'tvFilename':true,'avFilename':true};
   $$('#view input[name]').forEach(function(inp){
     var n=inp.getAttribute('name');
     if(inp.type==='checkbox'){ cfg[n]=inp.checked; return; }
     var v=inp.value.trim();
+    if(STRING_FIELDS[n]){ cfg[n]=v; return; }
     cfg[n]=v===''?undefined:Number(v);
   });
   cfg.adultKeywords=$('#kw').value.split(/[,，、\\s]+/).map(function(s){ return s.trim(); }).filter(Boolean);
@@ -1164,7 +1188,7 @@ function handle(act,btn){
 
   if(act==='add-live'){
     var ltr=document.createElement('tr');
-    ltr.innerHTML='<td><input name="name" placeholder="直播源名"></td><td><input name="url" placeholder="https://.../live.m3u"></td><td style="width:80px"><input name="type" placeholder="type"></td><td><input name="epg" placeholder="EPG（可空）"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+    ltr.innerHTML='<td><input name="name" placeholder="直播源名"></td><td><input name="url" placeholder="https://user:pass@host/...m3u"></td><td style="width:80px"><input name="type" placeholder="type"></td><td><input name="ua" placeholder="UA（可空）"></td><td><input name="epg" placeholder="EPG（可空）"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
     $('#liveRows').appendChild(ltr); return Promise.resolve();
   }
   if(act==='bulk-live'){
@@ -1182,7 +1206,7 @@ function handle(act,btn){
       }
       if(!/^https?:/i.test(url)){ lskipped+=1; return; }
       var tr=document.createElement('tr');
-      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td><td style="width:80px"><input name="type"></td><td><input name="epg"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
+      tr.innerHTML='<td><input name="name" value="'+esc(name)+'"></td><td><input name="url" value="'+esc(url)+'"></td><td style="width:80px"><input name="type"></td><td><input name="ua"></td><td><input name="epg"></td><td class="tight"><input type="checkbox" name="enabled" checked></td><td class="small" data-testid="1">—</td><td class="tight"><button class="ghost" data-act="test-live" title="在线测试该直播源">测试</button></td><td class="tight"><button class="ghost" data-act="live-up" title="上移">↑</button><button class="ghost" data-act="live-down" title="下移">↓</button></td><td class="tight"><button class="ghost" data-act="del-live">删除</button></td>';
       $('#liveRows').appendChild(tr);
       ladded+=1;
     });
@@ -1245,6 +1269,15 @@ function handle(act,btn){
       if(d.overrides) S.state.overrides=d.overrides;
       toast('已彻底删除'+(d.removed?('，移除 '+d.removed+' 条'):''));
       return loadFiles().then(render);
+    });
+  }
+  if(act==='clear-blocklist'){
+    if(!S.state.blocklist||!S.state.blocklist.length){ toast('当前没有已删除的记录'); return Promise.resolve(); }
+    if(!confirm('确定全部清除 '+S.state.blocklist.length+' 条已删除记录？清除后这些源将不再被拦截（下次整理时会重新评估是否有效）。')) return Promise.resolve();
+    return req('POST','/api/admin/blocklist',{blocklist:[]}).then(function(d){
+      S.state.blocklist=d.blocklist||[];
+      toast('已全部清除 blocklist');
+      return render();
     });
   }
   if(act==='clear-ov'){

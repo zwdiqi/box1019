@@ -22,6 +22,8 @@ export const DEFAULT_CONFIG = {
   adultKeywords: DEFAULT_ADULT_KEYWORDS,
   fetchTimeoutMs: 8000,
   probeTimeoutMs: 8000,
+  // 全局 User-Agent：用于下载源配置、测速站点、探测直播源
+  userAgent: 'okhttp/4.9.0',
   // Cloudflare 单次请求并发出站连接上限为 6，留 1 个给 KV
   probeConcurrency: 5,
   chunkSize: 25,
@@ -38,6 +40,9 @@ export const DEFAULT_CONFIG = {
   tickTimeBudgetMs: 780000,
   heartbeatEnabled: true,
   customFilesEnabled: true,
+  // 输出订阅文件名（不含 .json 后缀，URL 路径里会自动拼上）
+  tvFilename: 'tv',
+  avFilename: 'av',
   // 直播源自动更新：检测有效后按测速结果并入 tv.json 的 lives 数组
   liveEnabled: true,
   liveTimeoutMs: 12000,

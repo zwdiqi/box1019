@@ -105,8 +105,10 @@ function sanitizeLives(value) {
     };
     const epg = clampString(item.epg, 1000).trim();
     const logo = clampString(item.logo, 1000).trim();
+    const ua = clampString(item.ua, 500).trim();
     if (epg) entry.epg = epg;
     if (logo) entry.logo = logo;
+    if (ua) entry.ua = ua;
     out.push(entry);
   }
   return out;
@@ -139,13 +141,22 @@ function sanitizeConfig(value) {
     const n = Number(v);
     return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : def;
   };
-  return {
+  const name = (v, def, reservedSet) => {
+    const n = clampString(v, 32).trim().toLowerCase();
+    if (!/^[a-z0-9_-]{1,32}$/i.test(n)) return def;
+    if (reservedSet && reservedSet.has(n)) return def;
+    return n;
+  };
+  // 保留名集合：自定义订阅不能取这些名字；默认订阅名也不能重名
+  const builtinReserved = new Set(['index', 'admin', 'api', 'assets', 'favicon', 'robots']);
+  const base = {
     adultKeywords: asArray(src.adultKeywords)
       .slice(0, 300)
       .map((k) => clampString(k, 60).trim())
       .filter(Boolean),
     fetchTimeoutMs: num(src.fetchTimeoutMs, DEFAULT_CONFIG.fetchTimeoutMs, 1000, 30000),
     probeTimeoutMs: num(src.probeTimeoutMs, DEFAULT_CONFIG.probeTimeoutMs, 1000, 30000),
+    userAgent: clampString(src.userAgent, 500).trim() || DEFAULT_CONFIG.userAgent,
     probeConcurrency: num(src.probeConcurrency, DEFAULT_CONFIG.probeConcurrency, 1, 5),
     chunkSize: num(src.chunkSize, DEFAULT_CONFIG.chunkSize, 5, 100),
     maxSites: num(src.maxSites, DEFAULT_CONFIG.maxSites, 10, 5000),
@@ -160,6 +171,15 @@ function sanitizeConfig(value) {
     customFilesEnabled: src.customFilesEnabled !== false,
     autoUpdate: normalizeSchedule(isPlainObject(src.autoUpdate) ? src.autoUpdate : DEFAULT_CONFIG.autoUpdate),
   };
+  // tvFilename / avFilename 不能相同，也不能与保留名冲突
+  let tvName = name(src.tvFilename, DEFAULT_CONFIG.tvFilename, builtinReserved);
+  let avName = name(src.avFilename, DEFAULT_CONFIG.avFilename, builtinReserved);
+  if (tvName === avName) {
+    avName = tvName === DEFAULT_CONFIG.avFilename ? DEFAULT_CONFIG.avFilename : DEFAULT_CONFIG.tvFilename;
+  }
+  base.tvFilename = tvName;
+  base.avFilename = avName;
+  return base;
 }
 
 function sleep(ms) {
@@ -316,7 +336,7 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
       const results = await mapLimit(urls, 5, async (u) => {
         const t0 = Date.now();
         try {
-          const text = await fetchText(u, cfg.fetchTimeoutMs);
+          const text = await fetchText(u, cfg.fetchTimeoutMs, cfg.userAgent);
           const parsed = parseConfig(text, u);
           if (parsed.kind === 'config') return { url: u, ok: true, ms: Date.now() - t0, sites: parsed.sites.length };
           if (parsed.kind === 'repo') return { url: u, ok: true, ms: Date.now() - t0, repos: parsed.repos.length };
@@ -331,7 +351,7 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
     if (kind === 'live') {
       // 直播源：下载限长正文，判定有效性（过短 / HTML 错误页视为无效）
       const results = await mapLimit(urls, 5, async (u) => {
-        const r = await fetchLimited(u, cfg.liveTimeoutMs, 65536);
+        const r = await fetchLimited(u, cfg.liveTimeoutMs, 65536, cfg.userAgent);
         const valid = r.ok && isValidLiveText(r.text, cfg.liveMinBytes);
         return {
           url: u,
@@ -347,7 +367,7 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
 
     // 站点接口：测 TTFB（拿到响应头即算连通）
     const results = await mapLimit(urls, 5, async (u) => {
-      const r = await probe(u, cfg.probeTimeoutMs);
+      const r = await probe(u, cfg.probeTimeoutMs, undefined, cfg.userAgent);
       return { url: u, ok: !!r.ok, ms: r.ms, status: r.status, error: r.ok ? undefined : (r.error || 'unreachable') };
     });
     return ok({ kind, results });

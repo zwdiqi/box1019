@@ -9,11 +9,11 @@ import { handleAdminApi } from './api/admin.js';
 import { publicStatus, serveCustom, serveSubscription } from './api/public.js';
 import { verifySession } from './core/auth.js';
 import { KEY } from './core/keys.js';
-import { ensureBootstrap } from './core/sources.js';
+import { ensureBootstrap, loadConfig } from './core/sources.js';
 import { CORS_HEADERS, fail } from './core/util.js';
 
 const CUSTOM_RE = /^\/([A-Za-z0-9_-]{1,32})\.json$/;
-const RESERVED = new Set(['tv', 'av', 'index', 'admin', 'api', 'assets', 'favicon', 'robots']);
+const RESERVED_BASE = new Set(['index', 'admin', 'api', 'assets', 'favicon', 'robots']);
 const HTML_HEADERS = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
 
 export async function route(request, env) {
@@ -34,8 +34,22 @@ export async function route(request, env) {
   }
   if (path.startsWith('/api/')) return fail('接口不存在', 404);
 
-  if (path === '/tv.json') return serveSubscription(env, KEY.TV, 'tv');
-  if (path === '/av.json') return serveSubscription(env, KEY.AV, 'av');
+  // 订阅路由、自定义订阅、/admin 都需要动态配置（tvFilename / avFilename）
+  // 只对这些路径执行 ensureBootstrap + loadConfig，避免静态资源请求（/style.css 等）多一次 KV 读
+  const needCfg =
+    path === '/admin' || path === '/admin/' || path === '/admin.html' ||
+    path.endsWith('.json');
+  if (needCfg) {
+    await ensureBootstrap(env);
+    const cfg = await loadConfig(env);
+    const tvFilename = cfg.tvFilename || 'tv';
+    const avFilename = cfg.avFilename || 'av';
+    RESERVED_BASE.add(tvFilename);
+    RESERVED_BASE.add(avFilename);
+
+    if (path === `/${tvFilename}.json`) return serveSubscription(env, KEY.TV, 'tv');
+    if (path === `/${avFilename}.json`) return serveSubscription(env, KEY.AV, 'av');
+  }
 
   if (path === '/admin' || path === '/admin/') {
     // 后台界面本体不进静态资源目录：未登录只下发登录页，登录后才下发完整管理界面
