@@ -13,7 +13,7 @@ import {
   verifyPassword,
 } from '../core/auth.js';
 import { KEY } from '../core/keys.js';
-import { isValidLiveText, liveId } from '../core/lives.js';
+import { dedupeLives, isValidLiveText, liveId, sortLivesBySpeed, toOutputLive } from '../core/lives.js';
 import { applyManualOrder } from '../core/merge.js';
 import { continueRun, getPipelineState, pipelineProgress, startRun } from '../core/pipeline.js';
 import { parseConfig, siteId } from '../core/normalize.js';
@@ -350,8 +350,12 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
 
     if (kind === 'live') {
       // 直播源：下载限长正文，判定有效性（过短 / HTML 错误页视为无效）
+      // UA 优先级：单条指定的 ua > uas 映射中该地址的 ua > 全局 UA
+      const singleUa = clampString(body.ua, 500).trim();
+      const uas = isPlainObject(body.uas) ? body.uas : {};
       const results = await mapLimit(urls, 5, async (u) => {
-        const r = await fetchLimited(u, cfg.liveTimeoutMs, 65536, cfg.userAgent);
+        const ua = singleUa || clampString(uas[u], 500).trim() || cfg.userAgent;
+        const r = await fetchLimited(u, cfg.liveTimeoutMs, 65536, ua);
         const valid = r.ok && isValidLiveText(r.text, cfg.liveMinBytes);
         return {
           url: u,
@@ -553,6 +557,47 @@ export async function handleAdminApi(request, env, segments, isAuthed) {
       await putJSON(env, KEY.LIVES, lives);
       return ok({ lives });
     }
+  }
+
+  // —— 直播源：把前端检测结果直接写入当前 tv.json（无需跑完整整理） ——
+  if (path === 'lives/apply' && method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(request, 2 * 1024 * 1024);
+    } catch {
+      return fail('请求体格式不正确或过大');
+    }
+    const lives = sanitizeLives(body.lives);
+    const results = isPlainObject(body.results) ? body.results : {};
+    const file = await getJSON(env, KEY.TV, null);
+    if (!isPlainObject(file)) return fail('当前还没有 tv.json，请先执行一次完整整理', 400);
+
+    const entries = [];
+    let skipped = 0;
+    for (const l of lives) {
+      if (l.enabled === false) continue;
+      const r = results[l.url];
+      // 没有检测结果的条目保留（例如非 http 地址），有结果的以检测为准
+      const ok = r ? !!(r.ok && r.valid !== false) : true;
+      if (!ok) { skipped += 1; continue; }
+      entries.push({
+        ...l,
+        _ok: true,
+        _latency: r && r.ok ? r.ms : null,
+        _id: liveId(l),
+      });
+    }
+
+    const order = await getJSON(env, KEY.ORDER, {});
+    const orderMap = isPlainObject(order) && isPlainObject(order.lives) ? order.lives : {};
+    const next = applyManualOrder(sortLivesBySpeed(dedupeLives(entries)), orderMap, (l) => liveId(l)).map(toOutputLive);
+
+    file.lives = next;
+    if (!isPlainObject(file._meta)) file._meta = {};
+    file._meta.liveCount = next.length;
+    file._meta.updated = nowIso();
+    await putConfig(env, KEY.TV, file);
+    return ok({ lives: next, skipped });
   }
 
   // —— 自定义命名订阅文件 ——

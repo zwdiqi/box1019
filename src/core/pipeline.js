@@ -314,6 +314,15 @@ async function tickRank(env, state, ctx) {
     (l) => (l && l._id) || liveId(l),
   ).map(toOutputLive);
 
+  // 直播源检测明细：连同被剔除的原因一起记录，后台可据此判断「为什么某个源没进 tv.json」
+  const liveReport = (Array.isArray(liveRaw) ? liveRaw : []).map((l) => ({
+    name: l && l.name ? String(l.name) : '',
+    url: l && l.url ? String(l.url) : '',
+    ok: !!(l && l._ok === true),
+    ms: l && Number.isFinite(l._latency) ? l._latency : null,
+    err: !l ? '数据异常' : l._ok === true ? '' : l._ok === null ? '未检测（非 http 地址或 type 3）' : l._err || '检测失败',
+  }));
+
   const tvFile = {
     sites: tvSites,
     lives,
@@ -346,6 +355,7 @@ async function tickRank(env, state, ctx) {
     startedAt: state.startedAt,
     durationMs: Number.isFinite(startedMs) ? Date.now() - startedMs : null,
     counts: { ...state.counts, dead },
+    liveReport,
     errorCount: state.errors.length,
     errors: state.errors.slice(0, 50),
   });

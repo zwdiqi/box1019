@@ -13,16 +13,42 @@ import { decryptContent } from './decrypt.js';
 
 const DEFAULT_UA = 'okhttp/4.9.0';
 
+/** 宽松解码：非法百分号转义时退回原文，避免 decodeURIComponent 抛错 */
+function safeDecode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 /**
- * 从 URL 中提取 `user:pass@` 形式的 Basic Auth 凭据。
- * 返回 { cleanUrl, userinfo } 或 null（无凭据）。
- * Cloudflare fetch 会忽略 URL 中的 userinfo，必须手动拆出并加 Authorization header。
+ * 从 URL 中提取 `user:pass@` 形式的 Basic Auth 凭据，并返回去掉凭据的地址。
+ * Cloudflare fetch 在 URL 含凭据时会直接抛 TypeError，必须拆出来改成 Authorization 头。
+ * 用 WHATWG URL 解析（而非正则），可正确处理含 `/`、`@`、中文等特殊字符的账号口令。
  */
 export function extractBasicAuth(url) {
   if (typeof url !== 'string') return null;
-  const m = url.match(/^([a-z]+:\/\/)([^/@]+)@(.+)$/i);
-  if (!m) return null;
-  return { cleanUrl: m[1] + m[3], userinfo: m[2] };
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!parsed.username && !parsed.password) return null;
+  const user = safeDecode(parsed.username);
+  const pass = safeDecode(parsed.password);
+  parsed.username = '';
+  parsed.password = '';
+  return { cleanUrl: parsed.toString(), userinfo: user + (pass ? `:${pass}` : '') };
+}
+
+/** btoa 只接受 latin1，先按 UTF-8 转成二进制串，避免非 ASCII（如中文）口令抛错 */
+function toBinaryString(str) {
+  const bytes = new TextEncoder().encode(str);
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 1) out += String.fromCharCode(bytes[i]);
+  return out;
 }
 
 /** 构建 fetch 的 headers：处理 Basic Auth + UA + Accept */
@@ -31,7 +57,7 @@ function buildHeaders(url, ua) {
   if (ua) headers['User-Agent'] = ua;
   const auth = extractBasicAuth(url);
   if (auth) {
-    headers['Authorization'] = 'Basic ' + btoa(decodeURIComponent(auth.userinfo));
+    headers['Authorization'] = 'Basic ' + btoa(toBinaryString(auth.userinfo));
     // URL 里去掉 userinfo，返回 cleanUrl
     return { headers, cleanUrl: auth.cleanUrl };
   }

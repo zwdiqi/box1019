@@ -61,7 +61,7 @@ export async function route(request, env) {
   }
 
   const custom = CUSTOM_RE.exec(path);
-  if (custom && !RESERVED.has(custom[1].toLowerCase())) {
+  if (custom && !RESERVED_BASE.has(custom[1].toLowerCase())) {
     const res = await serveCustom(env, custom[1]);
     if (res) return res;
     return fail('自定义订阅不存在', 404);

@@ -22,6 +22,8 @@ header.top h1{font-size:18px;margin:0;font-weight:600}
 header.top .spacer{flex:1}
 .badge{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
 .badge.warn{color:var(--warn);border-color:#5a4616}
+.badge.run{color:var(--accent);border-color:var(--accent);animation:bpulse 1.3s ease-in-out infinite}
+@keyframes bpulse{0%,100%{opacity:1}50%{opacity:.35}}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0}
 .tab{background:var(--panel);border:1px solid var(--line);color:var(--muted);padding:8px 14px;border-radius:999px;cursor:pointer;font-size:13px}
 .tab:hover{color:var(--text)}
@@ -222,14 +224,16 @@ function testBadge(r,src){
   }
   return '<span class="lat slow" title="'+esc(r.error||'失败')+'">失败</span>';
 }
-function testUrls(kind,urls,resMap,statId,onBatch,onDone){
+function testUrls(kind,urls,resMap,statId,onBatch,onDone,uas){
   var chunks=[];
   for(var i=0;i<urls.length;i+=6){ chunks.push(urls.slice(i,i+6)); }
   var total=urls.length, doneN=0;
   function next(){
     if(!chunks.length){ if(onDone) onDone(); return Promise.resolve(); }
     var batch=chunks.shift();
-    return req('POST','/api/admin/test',{kind:kind,urls:batch}).then(function(d){
+    var payload={kind:kind,urls:batch};
+    if(uas) payload.uas=uas;
+    return req('POST','/api/admin/test',payload).then(function(d){
       (d.results||[]).forEach(function(r){ resMap[r.url]=r; });
       doneN+=batch.length;
       var st=document.getElementById(statId);
@@ -258,9 +262,7 @@ function loadFiles(){
 
 function render(){
   $('#bgPwd').style.display=(S.state&&S.state.usingDefaultPassword)?'':'none';
-  var p=S.state&&S.state.pipeline;
-  $('#bgPipe').textContent=(p&&p.running)?(p.phase+' '+p.percent+'%'):'空闲';
-  $('#bgPipe').className='badge'+((p&&p.running)?' warn':'');
+  updateBadge();
   $('#tabs').innerHTML=TABS.map(function(t){ return '<button class="tab'+(S.tab===t[0]?' active':'')+'" data-tab="'+t[0]+'">'+t[1]+'</button>'; }).join('');
   if(S.tab==='dash') renderDash();
   else if(S.tab==='preview') renderPreview();
@@ -271,6 +273,26 @@ function render(){
   else if(S.tab==='subs') renderSubs();
   else if(S.tab==='config'){ renderConfig(); updateIntervalHint(); }
   else if(S.tab==='security') renderSecurity();
+}
+
+// 整理阶段 → 中文提示（顶部状态徽标与看板共用）
+var PHASE_LABELS={fetch:'抓取源',speed:'测速中',live:'检测直播源',rank:'生成订阅',done:'已完成'};
+function phaseLabel(ph){
+  return PHASE_LABELS[ph]||(ph||'整理中');
+}
+// 顶部徽标：空闲 / 整理中（带脉冲动画 + 阶段与百分比）
+function updateBadge(){
+  var el=$('#bgPipe'); if(!el) return;
+  var p=S.state&&S.state.pipeline;
+  if(p&&p.running){
+    el.textContent=phaseLabel(p.phase)+' '+p.percent+'%';
+    el.className='badge run';
+    el.title='整理进行中：'+phaseLabel(p.phase)+'（'+p.percent+'%）'+' · 开始 '+fmtTime(p.startedAt);
+  }else{
+    el.textContent='空闲';
+    el.className='badge';
+    el.title='当前没有进行中的整理任务';
+  }
 }
 
 function card(inner){ return '<div class="card">'+inner+'</div>'; }
@@ -286,7 +308,7 @@ function renderDash(){
   var html='';
   html+=card(
     '<h2>运行状态</h2>'+
-    (p? ('<div class="row" style="margin-bottom:10px"><b id="phaseTxt">'+esc(p.phase)+'</b><span class="muted small">开始 '+fmtTime(p.startedAt)+' · 更新 '+fmtTime(p.updatedAt)+'</span></div>'+
+    (p? ('<div class="row" style="margin-bottom:10px"><b id="phaseTxt">'+esc(phaseLabel(p.phase))+'</b><span class="muted small">开始 '+fmtTime(p.startedAt)+' · 更新 '+fmtTime(p.updatedAt)+'</span></div>'+
           '<div class="progress"><i id="bar" style="width:'+p.percent+'%"></i></div>'+
           '<div class="muted small" style="margin-top:6px">进度 '+p.percent+'% · 源 '+p.sourceCursor+' · 分片 '+p.chunkCursor+'/'+p.chunkCount+' · 错误 '+(p.errorCount||0)+'</div>')
         : '<p class="muted">当前没有进行中的整理任务。</p>')+
@@ -303,8 +325,20 @@ function renderDash(){
   if(lr&&lr.errors&&lr.errors.length){
     html+=card('<h2>最近错误（最多 50 条）</h2><div class="err-list">'+lr.errors.map(function(e){ return '<div class="log"><b>'+esc(e.message)+'</b><br><span class="muted">'+esc(e.url)+'</span></div>'; }).join('')+'</div>');
   }
+  var lrep=(lr&&Array.isArray(lr.liveReport))?lr.liveReport:[];
+  if(lrep.length){
+    var bad=lrep.filter(function(x){ return !x.ok; });
+    html+=card('<h2>直播源检测明细（共 '+lrep.length+' 条，未通过 '+bad.length+' 条）</h2>'+
+      '<p class="muted small">只有「通过」的会写入 tv.json 的 lives。未通过的常见原因：源服务器拒绝 Cloudflare 访问、端口非标准、需要特定 UA 或鉴权不匹配。</p>'+
+      '<div class="table-wrap"><table><thead><tr><th>名称</th><th>地址</th><th style="width:90px">结果</th><th>原因</th></tr></thead><tbody>'+
+      lrep.map(function(x){
+        return '<tr><td>'+esc(x.name)+'</td><td class="mono small">'+esc(x.url)+'</td>'+
+          '<td>'+(x.ok?'<span class="lat fast">通过'+(x.ms==null?'':' '+x.ms+'ms')+'</span>':'<span class="lat slow">未通过</span>')+'</td>'+
+          '<td class="small">'+esc(x.ok?'':x.err)+'</td></tr>';
+      }).join('')+
+      '</tbody></table></div>');
+  }
   $('#view').innerHTML=html;
-  schedulePoll();
 }
 
 // 源预览：只读展示 tv.json / av.json 中的源，支持分类切换、搜索、在线测速与手动排序
@@ -435,15 +469,21 @@ function linkBox(label,url){
   '</div>';
 }
 
-function schedulePoll(){
-  clearTimeout(S.pollTimer);
-  var p=S.state&&S.state.pipeline;
-  if(!(p&&p.running)) return;
-  S.pollTimer=setTimeout(function(){
-    // 只在看板轮询：切到别的标签页时停止，否则重建 DOM 会冲掉正在编辑的内容
-    if(S.tab!=='dash') return;
-    loadState().then(render).catch(function(){});
-  },4000);
+// 常驻轮询：无论当前在哪个标签页、无论整理是由点击还是心跳/cron 触发，
+// 顶部徽标都能及时反映状态；只在看板（无输入框）时顺带整体重绘，避免打断其他页的编辑。
+function startPolling(){
+  if(S.pollTimer) return;
+  S.pollTimer=setInterval(function(){
+    loadState().then(function(d){
+      var wasRunning=!!(S.state&&S.state.pipeline&&S.state.pipeline.running);
+      S.state=d;
+      updateBadge();
+      if(S.tab==='dash'){ renderDash(); return; }
+      // 直播源页：状态变化（如后台自动跑完一轮）时刷新一次，便于看到最新检测结果
+      var nowRunning=!!(d&&d.pipeline&&d.pipeline.running);
+      if(S.tab==='lives'&&wasRunning!==nowRunning&&!nowRunning) loadFiles().then(render);
+    }).catch(function(){});
+  },3000);
 }
 
 // 源地址清单
@@ -567,6 +607,16 @@ function collectManualGroup(g){
 function renderLives(){
   var list=(S.state&&S.state.lives)||[];
   var liveEnabled=(S.state&&S.state.config&&S.state.config.liveEnabled)!==false;
+  // 上次整理时每个直播源的检测结果（来自 LAST_RUN），用于解释「为什么没进 tv.json」
+  var lastRun=(S.state&&S.state.lastRun)||{};
+  var lastMap={};
+  (Array.isArray(lastRun.liveReport)?lastRun.liveReport:[]).forEach(function(x){ if(x&&x.url) lastMap[x.url]=x; });
+  function lastBadge(url){
+    var r=lastMap[url];
+    if(!r) return '<span class="muted small">未参与</span>';
+    if(r.ok) return '<span class="lat fast">通过 '+(r.ms==null?'—':r.ms+'ms')+'</span>';
+    return '<span class="lat slow" title="'+esc(r.err||'检测失败')+'">未通过</span>';
+  }
   var rows=list.map(function(l,i){
     return '<tr data-i="'+i+'">'+
       '<td><input name="name" value="'+esc(l.name)+'" placeholder="直播源名"></td>'+
@@ -576,6 +626,7 @@ function renderLives(){
       '<td><input name="epg" value="'+esc(l.epg)+'" placeholder="EPG（可空）"></td>'+
       '<td class="tight"><input type="checkbox" name="enabled"'+(l.enabled!==false?' checked':'')+'></td>'+
       '<td class="small" data-testid="1">'+testBadge(LIVETEST[l.url],'live')+'</td>'+
+      '<td class="small">'+lastBadge(l.url)+'</td>'+
       '<td class="tight"><button class="ghost" data-act="test-live" data-i="'+i+'" title="在线测试该直播源">测试</button></td>'+
       '<td class="tight"><button class="ghost" data-act="live-up" data-i="'+i+'" title="上移">↑</button><button class="ghost" data-act="live-down" data-i="'+i+'" title="下移">↓</button></td>'+
       '<td class="tight"><button class="ghost" data-act="del-live" data-i="'+i+'">删除</button></td>'+
@@ -586,11 +637,13 @@ function renderLives(){
     '<p class="muted small">这些直播源会在整理时被自动下载检测：<b>只有检测正常的才会写入 tv.json 的 lives 数组，并按检测速度（毫秒）升序排列</b>。'+
       'URL 支持 <code>https://user:pass@host/path</code> 形式的加密连接（自动转为 Basic Auth）。'+
       '每行可单独设置 UA（留空用配置里的全局 UA）。'+
+      '「上次整理」列显示最近一次整理时该源的检测结果，鼠标悬停可看到被剔除的具体原因。'+
       (liveEnabled?'':'<b>（当前配置已关闭直播源自动更新）</b>')+'</p>'+
-    '<table><thead><tr><th>名称</th><th>地址</th><th style="width:60px">type</th><th style="width:200px">UA（可空）</th><th>EPG</th><th style="width:44px">启用</th><th style="width:110px">测试结果</th><th style="width:60px">测试</th><th style="width:80px">排序</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
+    '<table><thead><tr><th>名称</th><th>地址</th><th style="width:60px">type</th><th style="width:200px">UA（可空）</th><th>EPG</th><th style="width:44px">启用</th><th style="width:110px">即时测试</th><th style="width:100px">上次整理</th><th style="width:60px">测试</th><th style="width:80px">排序</th><th></th></tr></thead><tbody id="liveRows">'+rows+'</tbody></table>'+
     '<div class="toolbar" style="margin-top:12px">'+
       '<button class="ghost" data-act="add-live">新增一行</button>'+
       '<button data-act="save-lives">保存清单</button>'+
+      '<button class="ghost" data-act="apply-lives" title="对启用的直播源逐个检测，把通过的按速度直接写入 tv.json（不跑完整整理）">检测并写入 tv.json</button>'+
       '<button class="ghost" data-act="import-live">导入 JSON</button>'+
       '<button class="ghost" data-act="export-live">导出 JSON</button>'+
       '<button class="ghost" data-act="test-live-all">测试全部</button>'+
@@ -1096,8 +1149,12 @@ function handle(act,btn){
     var lurl=lrow.querySelector('[name=url]').value.trim();
     if(!/^https?:/i.test(lurl)){ toast('请先填写有效的直播源地址'); return Promise.resolve(); }
     var lcell=lrow.querySelector('[data-testid]');
+    var luaEl=lrow.querySelector('[name=ua]');
+    var lua=luaEl?luaEl.value.trim():'';
     if(lcell) lcell.innerHTML='<span class="lat na">测试中…</span>';
-    return req('POST','/api/admin/test',{kind:'live',urls:[lurl]}).then(function(d){
+    var lpayload={kind:'live',urls:[lurl]};
+    if(lua) lpayload.ua=lua;
+    return req('POST','/api/admin/test',lpayload).then(function(d){
       var r=(d.results||[])[0]||{ok:false,error:'无结果'};
       LIVETEST[lurl]=r;
       if(lcell) lcell.innerHTML=testBadge(r,'live');
@@ -1105,9 +1162,10 @@ function handle(act,btn){
   }
   if(act==='test-live-all'){
     var lurls=[];
+    var luas={};
     $$('#liveRows tr').forEach(function(tr){
       var u=tr.querySelector('[name=url]').value.trim();
-      if(/^https?:/i.test(u)) lurls.push(u);
+      if(/^https?:/i.test(u)){ lurls.push(u); var uaEl=tr.querySelector('[name=ua]'); if(uaEl&&uaEl.value.trim()) luas[u]=uaEl.value.trim(); }
     });
     if(!lurls.length){ toast('清单里没有有效的直播源地址'); return Promise.resolve(); }
     if(lurls.length>60){ lurls=lurls.slice(0,60); toast('地址较多，本次测试前 60 条'); }
@@ -1121,7 +1179,7 @@ function handle(act,btn){
     },function(){
       var s2=document.getElementById('liveStat');
       if(s2) s2.textContent='测试完成';
-    });
+    },luas);
   }
   // —— 直播源清单：行上移/下移（DOM 移动，保存清单后生效） ——
   if(act==='live-up'){ moveRowUp(btn.closest('tr')); return Promise.resolve(); }
@@ -1217,6 +1275,22 @@ function handle(act,btn){
   if(act==='del-live'){ btn.closest('tr').remove(); return Promise.resolve(); }
   if(act==='save-lives'){
     return req('POST','/api/admin/lives',{lives:collectLives()}).then(function(d){ S.state.lives=d.lives; toast('直播源清单已保存'); render(); });
+  }
+  if(act==='apply-lives'){
+    // 逐个检测启用的直播源，把通过的按速度直接写入 tv.json（不跑完整整理，省配额）
+    var alist=collectLives().filter(function(l){ return l.enabled!==false; }).filter(function(l){ return /^https?:/i.test(l.url); });
+    if(!alist.length){ toast('没有可检测的直播源地址'); return Promise.resolve(); }
+    if(alist.length>20){ toast('一次最多检测 20 条，已取前 20 条'); alist=alist.slice(0,20); }
+    var ast=document.getElementById('liveStat'); if(ast) ast.textContent='检测中 0/'+alist.length+' …';
+    return req('POST','/api/admin/lives',{lives:collectLives()}).then(function(){
+      var luas={}; alist.forEach(function(l){ if(l.ua) luas[l.url]=l.ua; });
+      return testUrls('live',alist.map(function(l){ return l.url; }),LIVETEST,'liveStat',null,null,luas);
+    }).then(function(){
+      return req('POST','/api/admin/lives/apply',{lives:collectLives(),results:LIVETEST});
+    }).then(function(d){
+      toast('已写入 tv.json：'+(d.lives||[]).length+' 条通过'+(d.skipped?('，'+(d.skipped)+' 条被剔除'):''));
+      return loadFiles().then(function(){ return loadState(); }).then(render);
+    });
   }
   if(act==='export-live'){
     return req('GET','/api/admin/export?type=lives').then(function(d){ download('lives.json',JSON.stringify(d.data,null,2)); toast('已导出'); });
@@ -1341,6 +1415,9 @@ function handle(act,btn){
 }
 
 function runPipeline(route){
+  // 立即给出反馈：不必等第一次轮询/接口返回
+  var bel=$('#bgPipe');
+  if(bel){ bel.textContent='整理中 · 启动中…'; bel.className='badge run'; }
   return req('POST','/api/admin/pipeline/'+route).then(function(){
     return Promise.all([loadState(),loadFiles()]);
   }).then(function(){
@@ -1352,6 +1429,7 @@ function runPipeline(route){
 // —— 启动 ——
 Promise.all([loadState(),loadFiles()]).then(function(){
   render();
+  startPolling();
 }).catch(function(err){
   toast('加载失败：'+(err.message||err),true);
 });
