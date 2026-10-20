@@ -198,6 +198,16 @@ async function tickSpeed(env, state, ctx) {
 }
 
 /**
+ * 判断直播源探测失败是否属于「基础设施层面的瞬时错误」。
+ * 这类错误（例如免费版单次 50 个子请求的额度被打爆、运行时网络异常）不代表源本身失效，
+ * 不应当把源判定为无效并从输出中剔除，而应标记为「未检测」保留，留待下一轮整理重试。
+ */
+const TRANSIENT_LIVE_ERR_RE = /too many subrequests|subrequest|aborted|timed out|timeout|network|fetch failed|connection/i;
+function isTransientLiveError(err) {
+  return typeof err === 'string' && TRANSIENT_LIVE_ERR_RE.test(err);
+}
+
+/**
  * 直播源阶段：读取后台配置的直播源清单，逐个探测有效性并记录 TTFB（毫秒）。
  * 结果写入单个 tmp key，rank 阶段再把「有效」的按速度并入 tv.json 的 lives。
  */
@@ -238,6 +248,10 @@ async function tickLive(env, state, ctx) {
         if (r && r.ok && isValidLiveText(r.text, cfg.liveMinBytes)) {
           out._ok = true;
           out._latency = r.ms;
+        } else if (isTransientLiveError(r && r.error)) {
+          // 瞬时基础设施错误：不判定为源失效，标记「未检测」保留在输出中，下轮重试
+          out._ok = null;
+          out._err = r.error;
         } else {
           out._ok = false;
           out._err = (r && r.error) || '内容无效（过短或非列表）';
@@ -320,7 +334,11 @@ async function tickRank(env, state, ctx) {
     url: l && l.url ? String(l.url) : '',
     ok: !!(l && l._ok === true),
     ms: l && Number.isFinite(l._latency) ? l._latency : null,
-    err: !l ? '数据异常' : l._ok === true ? '' : l._ok === null ? '未检测（非 http 地址或 type 3）' : l._err || '检测失败',
+    err: !l
+      ? '数据异常'
+      : l._ok === true
+        ? ''
+        : l._err || (l._ok === null ? '未检测（非 http 地址或 type 3）' : '检测失败'),
   }));
 
   const tvFile = {
@@ -391,20 +409,22 @@ export async function continueRun(env, { budget = 9000, deadlineMs = 780000 } = 
     const cursorBefore = state.sourceCursor + state.chunkCursor + state.liveCursor;
     let done = false;
     try {
+      // 直播源阶段排在站点测速之前：它只消耗 1 个子请求，先跑可确保不会被
+      // 站点测速耗尽额度（免费版单次调用仅 50 个子请求）而整条被丢弃
       if (state.phase === 'fetch') {
         done = await tickFetch(env, state, ctx);
-        if (done) {
-          state.phase = 'speed';
-          state.chunkCursor = 0;
-        }
-      } else if (state.phase === 'speed') {
-        done = await tickSpeed(env, state, ctx);
         if (done) {
           state.phase = 'live';
           state.liveCursor = 0;
         }
       } else if (state.phase === 'live') {
         done = await tickLive(env, state, ctx);
+        if (done) {
+          state.phase = 'speed';
+          state.chunkCursor = 0;
+        }
+      } else if (state.phase === 'speed') {
+        done = await tickSpeed(env, state, ctx);
         if (done) state.phase = 'rank';
       } else if (state.phase === 'rank') {
         await tickRank(env, state, ctx);
@@ -424,9 +444,9 @@ export async function continueRun(env, { budget = 9000, deadlineMs = 780000 } = 
       // 连续 3 次无进展 → 该阶段卡住，强制推进避免死循环
       if (noProgress >= 3) {
         state.errors.push({ phase: state.phase, message: '阶段无进展，强制推进' });
-        if (state.phase === 'fetch') { state.phase = 'speed'; state.chunkCursor = 0; }
-        else if (state.phase === 'speed') { state.phase = 'live'; state.liveCursor = 0; }
-        else if (state.phase === 'live') { state.phase = 'rank'; }
+        if (state.phase === 'fetch') { state.phase = 'live'; state.liveCursor = 0; }
+        else if (state.phase === 'live') { state.phase = 'speed'; state.chunkCursor = 0; }
+        else if (state.phase === 'speed') { state.phase = 'rank'; }
         else break;
         noProgress = 0;
       }
@@ -458,11 +478,11 @@ export function pipelineProgress(state) {
   let percent = 0;
   if (phase === 'done') percent = 100;
   else if (phase === 'fetch') percent = state.chunkCount ? 5 : 2;
+  else if (phase === 'live') percent = 10;
   else if (phase === 'speed') {
     const total = Math.max(1, state.chunkCount || 1);
-    percent = 5 + Math.round(((state.chunkCursor || 0) / total) * 80);
-  } else if (phase === 'live') percent = 88;
-  else if (phase === 'rank') percent = 95;
+    percent = 10 + Math.round(((state.chunkCursor || 0) / total) * 78);
+  } else if (phase === 'rank') percent = 95;
   return {
     runId: state.runId || null,
     phase,
